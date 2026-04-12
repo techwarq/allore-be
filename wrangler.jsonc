@@ -1,27 +1,24 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "allore_v1",
+  "name": "allore-be",
   "main": "src/index.ts",
   "compatibility_date": "2026-03-28",
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "alias": {
-    "tslib": "/Users/sonalinayak/allore_v1-be/allore_v1/node_modules/tslib/tslib.es6.js"
-  },
   "vars": {
     "ENV": "production",
     "QDRANT_URL": "https://090c9618-7e77-44f2-94d2-d8d994251c88.eu-central-1-0.aws.cloud.qdrant.io"
   },
   "env": {
     "dev": {
-      "name": "allore_v1-dev",
+      "name": "allore-be-dev",
       "vars": {
         "ENV": "development"
       }
     },
     "production": {
-      "name": "allore_v1-prod",
+      "name": "allore-be-prod",
       "vars": {
         "ENV": "production"
       }

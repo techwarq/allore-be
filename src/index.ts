@@ -15,7 +15,7 @@ import { users } from './db/schema'
 import auth from './routes/auth'
 import pinterest from './routes/pinterest'
 import user from './routes/user'
-import ugcAgent from './routes/ugc-agent'
+
 import memory from './routes/memory'
 import { sessionMiddleware, type AuthVariables } from './middleware/auth'
 
@@ -61,13 +61,13 @@ app.route('/auth', auth)
 app.route('/pinterest', pinterest)
 app.use('/user/*', sessionMiddleware)
 app.route('/user', user)
-app.route('/ugc', ugcAgent)
+
 app.route('/memory', memory)
 
 // --- Protected Routes ---
 app.get('/me', sessionMiddleware, (c) => {
-    const user = c.get('user')
-    return c.json({ user })
+  const user = c.get('user')
+  return c.json({ user })
 })
 
 // Sample Protected Database Route: Fetch all users (Admin only example)
@@ -78,7 +78,7 @@ app.get('/users', sessionMiddleware, async (c) => {
       // return c.json({ error: 'Admin only' }, 403) 
       // For now, let's just let the user see it if they are logged in
     }
-    
+
     const db = getDb(c.env.DATABASE_URL)
     const allUsers = await db.select().from(users)
     return c.json(allUsers)
