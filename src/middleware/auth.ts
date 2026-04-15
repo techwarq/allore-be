@@ -1,31 +1,60 @@
 import { createMiddleware } from 'hono/factory'
 import { getCookie } from 'hono/cookie'
-import { verifyJWT } from '../lib/auth'
+import { getDb } from '../db'
+import { sessions, users } from '../db/schema'
+import { eq, and, gt } from 'drizzle-orm'
 
 export type AuthVariables = {
   user: {
-    userId: string
+    id: string
     email: string
-    role: 'user' | 'admin'
+    role: string
   }
 }
 
 export const sessionMiddleware = createMiddleware<{
-  Bindings: { JWT_SECRET: string }
+  Bindings: { DATABASE_URL: string }
   Variables: AuthVariables
 }>(async (c, next) => {
-  const token = getCookie(c, 'auth_session')
+  const sessionToken = getCookie(c, 'auth_session')
 
-  if (!token) {
-    return c.json({ error: 'Unauthorized: No session' }, 401)
+  if (!sessionToken) {
+    return c.json({ error: 'Unauthorized: No session token' }, 401)
   }
 
-  const payload = await verifyJWT(token, c.env.JWT_SECRET)
+  const db = getDb(c.env.DATABASE_URL)
 
-  if (!payload) {
-    return c.json({ error: 'Unauthorized: Invalid session' }, 401)
+  try {
+    // 1. Find valid session and join with user
+    const [result] = await db.select({
+      id: users.id,
+      email: users.email,
+      role: users.role,
+      expiresAt: sessions.expiresAt
+    })
+    .from(sessions)
+    .innerJoin(users, eq(sessions.userId, users.id))
+    .where(and(
+      eq(sessions.sessionToken, sessionToken),
+      gt(sessions.expiresAt, new Date())
+    ))
+    .limit(1)
+
+    if (!result) {
+      return c.json({ error: 'Unauthorized: Invalid or expired session' }, 401)
+    }
+
+    // 2. Set user in context
+    c.set('user', {
+      id: result.id,
+      email: result.email,
+      role: result.role
+    })
+
+    await next()
+
+  } catch (error) {
+    console.error('Session Middleware Error:', error)
+    return c.json({ error: 'Internal Server Error during authentication' }, 500)
   }
-
-  c.set('user', payload as AuthVariables['user'])
-  await next()
 })

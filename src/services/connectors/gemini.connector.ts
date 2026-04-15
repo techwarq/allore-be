@@ -1,5 +1,5 @@
 export default class GeminiConnector {
-  private apiKey: string;
+  public apiKey: string;
   private baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
 
   constructor(apiKey: string) {

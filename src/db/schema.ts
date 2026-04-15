@@ -1,181 +1,188 @@
-import { pgTable, text, timestamp, uuid, integer, jsonb, pgEnum, boolean } from 'drizzle-orm/pg-core'
+import { pgTable, text, timestamp, uuid, integer, jsonb, boolean, numeric, primaryKey, decimal } from 'drizzle-orm/pg-core';
 
-// --- Enums ---
-export const roleEnum = pgEnum('role', ['user', 'admin'])
-export const authProviderEnum = pgEnum('auth_provider', ['local', 'google', 'both'])
-export const messageTypeEnum = pgEnum('message_type', ['user', 'assistant', 'system'])
+// 🔐 AUTH LAYER
 
-// --- Base Fields ---
-const baseFields = {
+export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
+  email: text('email').notNull().unique(),
+  role: text('role').default('user').notNull(),
+  emailVerified: boolean('email_verified').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}
+});
 
-// --- Collections Mapping ---
+export const authAccounts = pgTable('auth_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  provider: text('provider').notNull(), // 'local', 'google', etc.
+  providerId: text('provider_id'),      // Google ID, etc.
+  passwordHash: text('password_hash'),
+  failedAttempts: integer('failed_attempts').default(0).notNull(),
+  lastLoginAt: timestamp('last_login_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// 👤 Users ('users')
-export const users = pgTable('users', {
-  ...baseFields,
-  email: text('email').notNull().unique(),
-  name: text('name').notNull(),
-  password: text('password'), // Optional for Google users
-  googleId: text('google_id'),
-  role: roleEnum('role').default('user').notNull(),
-  authProvider: authProviderEnum('auth_provider').default('local').notNull(),
-  // Usage tracking
-  totalGenerations: integer('total_generations').default(0).notNull(),
-  totalImages: integer('total_images').default(0).notNull(),
-  lastActive: timestamp('last_active').defaultNow().notNull(),
-  // Verification
-  isVerified: boolean('is_verified').default(false).notNull(),
-  verificationToken: text('verification_token'),
-  verificationExpiresAt: timestamp('verification_expires_at'),
-  resetPasswordToken: text('reset_password_token'),
-  resetPasswordExpiresAt: timestamp('reset_password_expires_at'),
-})
+export const sessions = pgTable('sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  sessionToken: text('session_token').notNull().unique(),
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// 📁 Projects ('savedProjects')
+export const emailVerifications = pgTable('email_verifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  verified: boolean('verified').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// 👤 PROFILE
+
+export const profiles = pgTable('profiles', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull().unique(),
+  name: text('name'),
+  avatarUrl: text('avatar_url'),
+  companyName: text('company_name'),
+  preferences: jsonb('preferences').default({}).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// 🧠 PRODUCT SYSTEM
+
 export const projects = pgTable('projects', {
-  ...baseFields,
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  title: text('title').notNull(),
-  type: text('type').notNull(), // e.g., 'photoshoot', 'tryon', 'research'
-  context: jsonb('context').default({}).notNull(), // Workflow state and variables
-})
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  title: text('title'),
+  type: text('type'),
+  status: text('status').default('active').notNull(),
+  activeChatId: uuid('active_chat_id'), // To be updated during runtime
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
 
-// AI GENERATIONS
-
-// 🤖 Model Generations ('modelGenerations')
-export const modelGenerations = pgTable('model_generations', {
-  ...baseFields,
-  projectId: uuid('project_id').references(() => projects.id).notNull(),
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  gender: text('gender'),
-  ethnicity: text('ethnicity'),
-  age: text('age'),
-  skinTone: text('skin_tone'),
-  eyeColor: text('eye_color'),
-  hairStyle: text('hair_style'),
-  hairColor: text('hair_color'),
-  clothingStyle: text('clothing_style'),
-  results: jsonb('results').default([]).notNull(), // Array of image URLs/statuses
-})
-
-// 💃 Pose Generations ('poseGenerations')
-export const poseGenerations = pgTable('pose_generations', {
-  ...baseFields,
-  projectId: uuid('project_id').references(() => projects.id).notNull(),
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  prompt: text('prompt'),
-  count: integer('count').default(1).notNull(),
-  runwayImageUrl: text('runway_image_url'),
-  ratio: text('ratio'),
-  results: jsonb('results').default([]).notNull(),
-})
-
-// 🖼️ Background Generations ('backgroundGenerations')
-export const backgroundGenerations = pgTable('background_generations', {
-  ...baseFields,
-  projectId: uuid('project_id').references(() => projects.id).notNull(),
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  locationType: text('location_type'),
-  locationDetail: text('location_detail'),
-  cameraAngle: text('camera_angle'),
-  lightingStyle: text('lighting_style'),
-  mood: text('mood'),
-  results: jsonb('results').default([]).notNull(),
-})
-
-// MESSAGING
-
-// 💬 Chats & Messages
 export const chats = pgTable('chats', {
-  ...baseFields,
-  projectId: uuid('project_id').references(() => projects.id).notNull(),
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  title: text('title').notNull(),
-})
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+  parentChatId: uuid('parent_chat_id'), // Optional, for context branching
+  title: text('title'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
 export const messages = pgTable('messages', {
-  ...baseFields,
+  id: uuid('id').primaryKey().defaultRandom(),
+  chatId: uuid('chat_id').references(() => chats.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+  sender: text('sender').notNull(), // 'user', 'assistant', 'system'
+  type: text('type'),               // 'text', 'asset_generation', etc.
+  content: text('content'),
+  generationId: uuid('generation_id'),
+  version: integer('version').default(1).notNull(),
+  status: text('status').default('completed').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const generations = pgTable('generations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  projectId: uuid('project_id').references(() => projects.id).notNull(),
   chatId: uuid('chat_id').references(() => chats.id).notNull(),
-  senderId: uuid('sender_id').references(() => users.id).notNull(),
-  content: text('content').notNull(),
-  messageType: messageTypeEnum('message_type').default('user').notNull(),
-  userAssets: jsonb('user_assets').default([]).notNull(),
-  systemAssets: jsonb('system_assets').default([]).notNull(),
-})
+  messageId: uuid('message_id').references(() => messages.id),
+  type: text('type'),
+  status: text('status'),
+  inputJson: jsonb('input_json').default({}).notNull(),
+  outputJson: jsonb('output_json').default({}).notNull(),
+  creditsUsed: integer('credits_used').default(0).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
 
-// ASSETS
-
-// 📷 Assets ('uploadedAssets')
-export const uploadedAssets = pgTable('uploaded_assets', {
-  ...baseFields,
+export const assets = pgTable('assets', {
+  id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  fileUrl: text('file_url').notNull(),
-  assetType: text('asset_type').notNull(), // 'garment', 'model_ref', 'logo'
-  metadata: jsonb('metadata').default({}).notNull(),
-})
+  projectId: uuid('project_id').references(() => projects.id).notNull(),
+  chatId: uuid('chat_id').references(() => chats.id),
+  generationId: uuid('generation_id').references(() => generations.id),
+  type: text('type'),   // 'garment', 'model', etc.
+  source: text('source'), // 'upload', 'ai', 'pinterest'
+  url: text('url').notNull(),
+  metadataJson: jsonb('metadata_json').default({}).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// ✨ Generated Assets ('generatedAssets')
-export const generatedAssets = pgTable('generated_assets', {
-  ...baseFields,
+export const messageAssets = pgTable('message_assets', {
+  messageId: uuid('message_id').references(() => messages.id, { onDelete: 'cascade' }).notNull(),
+  assetId: uuid('asset_id').references(() => assets.id, { onDelete: 'cascade' }).notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.messageId, t.assetId] }),
+}));
+
+// 💰 BILLING SYSTEM
+
+export const plans = pgTable('plans', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  priceMonthly: decimal('price_monthly', { precision: 10, scale: 2 }).notNull(),
+  monthlyCredits: integer('monthly_credits').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const subscriptions = pgTable('subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  generationId: uuid('generation_id').notNull(), // Linked to specific generation ID
-  fileUrl: text('file_url').notNull(),
-  assetType: text('asset_type').notNull(),
-  metadata: jsonb('metadata').default({}).notNull(),
-})
+  planId: uuid('plan_id').references(() => plans.id).notNull(),
+  status: text('status').notNull(), // 'active', 'cancelled', 'past_due'
+  currentPeriodStart: timestamp('current_period_start'),
+  currentPeriodEnd: timestamp('current_period_end'),
+  cancelAtPeriodEnd: boolean('cancel_at_period_end').default(false).notNull(),
+  dodoSubscriptionId: text('dodo_subscription_id').unique(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// PREFERENCES & BRANDING
-
-// 🏢 Company Preferences
-export const companyPreferences = pgTable('company_preferences', {
-  ...baseFields,
+// Rename 'payments' to 'invoices'
+export const invoices = pgTable('invoices', {
+  id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  companyName: text('company_name').notNull(),
-  companyUrls: jsonb('company_urls').default([]).notNull(),
-  industry: text('industry'),
-  targetAudience: text('target_audience'),
-  brandDetails: jsonb('brand_details').default({}).notNull(),
-})
+  subscriptionId: uuid('subscription_id').references(() => subscriptions.id),
+  amount: decimal('amount', { precision: 10, scale: 2 }).notNull(),
+  status: text('status').notNull(),
+  dodoPaymentId: text('dodo_payment_id').unique(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// 🧑 User Preferences
-export const userPreferences = pgTable('user_preferences', {
-  ...baseFields,
+export const userCredits = pgTable('user_credits', {
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).primaryKey().notNull(),
+  creditsRemaining: integer('credits_remaining').default(0).notNull(),
+  lastResetAt: timestamp('last_reset_at').defaultNow().notNull(),
+});
+
+export const creditTransactions = pgTable('credit_transactions', {
+  id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  competitors: jsonb('competitors').default([]).notNull(), // URLs
-  resources: jsonb('resources').default([]).notNull(), // URLs
-  stylePreferences: jsonb('style_preferences').default({}).notNull(),
-  researchResults: jsonb('research_results').default({}).notNull(),
-})
+  changeAmount: integer('change_amount').notNull(),
+  reason: text('reason').notNull(), // 'monthly_grant', 'usage', 'topup', 'purchase'
+  referenceId: uuid('reference_id'), // messageId, invoiceId, etc.
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
 
-// SYSTEM
+// Track simplified chat usage counts
+export const chatUsage = pgTable('chat_usage', {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').references(() => users.id).notNull(),
+    day: timestamp('day').defaultNow().notNull(), // Truncated to day
+    count: integer('count').default(0).notNull(),
+});
 
-// 📋 Waitlist
 export const waitlist = pgTable('waitlist', {
-  ...baseFields,
+  id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull().unique(),
   name: text('name'),
   status: text('status').default('pending').notNull(),
-})
-
-// 💰 Purchases
-export const purchases = pgTable('purchases', {
-  ...baseFields,
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  planId: text('plan_id').notNull(),
-  paymentId: text('payment_id').notNull(),
-  status: text('status').notNull(),
-})
-
-// 📸 Private Assets ('private_assets')
-export const privateAssets = pgTable('private_assets', {
-  ...baseFields,
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  fileName: text('file_name').notNull(), // The R2 key (path)
-  originalUrl: text('original_url'),     // Pinterest original URL
-  contentType: text('content_type').default('image/jpeg').notNull(),
-  metadata: jsonb('metadata').default({}).notNull(),
-})
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});

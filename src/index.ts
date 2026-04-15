@@ -15,9 +15,13 @@ import { users } from './db/schema'
 import auth from './routes/auth'
 import pinterest from './routes/pinterest'
 import user from './routes/user'
+import billing from './routes/billing'
 
 import memory from './routes/memory'
+import chat from './routes/chat'
 import { sessionMiddleware, type AuthVariables } from './middleware/auth'
+import { GlobalLimiter } from './durable-objects/GlobalLimiter'
+import { ChatSession } from './durable-objects/ChatSession'
 
 type Bindings = {
   ENV: string
@@ -33,6 +37,9 @@ type Bindings = {
   GEMINI_API_KEY: string
   QDRANT_URL: string
   QDRANT_API_KEY: string
+  GLOBAL_LIMITER: DurableObjectNamespace
+  CHAT_SESSION: DurableObjectNamespace
+  CHAT_QUEUE: Queue
 }
 
 const app = new Hono<{ Bindings: Bindings, Variables: AuthVariables }>()
@@ -63,6 +70,8 @@ app.use('/user/*', sessionMiddleware)
 app.route('/user', user)
 
 app.route('/memory', memory)
+app.route('/chat', chat)
+app.route('/billing', billing)
 
 // --- Protected Routes ---
 app.get('/me', sessionMiddleware, (c) => {
@@ -86,6 +95,8 @@ app.get('/users', sessionMiddleware, async (c) => {
     return c.json({ error: error.message }, 500)
   }
 })
+
+export { GlobalLimiter, ChatSession }
 
 export default app
 
