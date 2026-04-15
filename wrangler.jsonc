@@ -9,8 +9,8 @@
   "vars": {
     "ENV": "production",
     "QDRANT_URL": "https://090c9618-7e77-44f2-94d2-d8d994251c88.eu-central-1-0.aws.cloud.qdrant.io",
-    "DODO_PAYMENTS_API_KEY": "DODO_PAYMENTS_API_KEY_PLACEHOLDER",
-    "DODO_WEBHOOK_SECRET": "DODO_WEBHOOK_SECRET_PLACEHOLDER"
+    "DODO_PAYMENTS_API_KEY": "wZOidXd9s3mxrqkr.Y_mYl6_Aj3tJI0C97d_q7LURNnmsSflSGLJ97UYF_hv8FxGu",
+    "DODO_WEBHOOK_SECRET": "whsec_U5j/R4RM87lrdR0dLTvkPeWFSP6nAf2/"
   },
   "env": {
     "dev": {
@@ -34,19 +34,31 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "GLOBAL_LIMITER", "class_name": "GlobalLimiter" },
-      { "name": "CHAT_SESSION", "class_name": "ChatSession" }
+      {
+        "name": "GLOBAL_LIMITER",
+        "class_name": "GlobalLimiter"
+      },
+      {
+        "name": "CHAT_SESSION",
+        "class_name": "ChatSession"
+      }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_classes": ["GlobalLimiter", "ChatSession"]
+      "new_classes": [
+        "GlobalLimiter",
+        "ChatSession"
+      ]
     }
   ],
   "queues": {
     "producers": [
-      { "binding": "CHAT_QUEUE", "queue": "allore-chat-logs" }
+      {
+        "binding": "CHAT_QUEUE",
+        "queue": "allore-chat-logs"
+      }
     ]
   }
 }

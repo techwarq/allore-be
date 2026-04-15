@@ -47,6 +47,12 @@ auth.post('/signup', async (c) => {
   const { email, password, name } = result.data
 
   try {
+    console.log(`🚀 Starting signup for ${email}`);
+    
+    // 0. Verify Environment
+    if (!c.env.JWT_SECRET) console.error('❌ JWT_SECRET is missing');
+    if (!c.env.RESEND_API_KEY) console.error('❌ RESEND_API_KEY is missing');
+
     // 1. Check if user exists
     const [existingUser] = await db.select().from(users).where(eq(users.email, email)).limit(1)
     if (existingUser) {
@@ -54,9 +60,12 @@ auth.post('/signup', async (c) => {
     }
 
     // 2. Create Base User
+    console.log('--- Step 2: Creating users entry');
     const [newUser] = await db.insert(users).values({ email }).returning()
+    if (!newUser) throw new Error('Failed to create user record');
 
     // 3. Create Auth Account (Local)
+    console.log('--- Step 3: Creating auth_accounts entry');
     const hashedPassword = await hashPassword(password)
     await db.insert(authAccounts).values({
       userId: newUser.id,
@@ -65,38 +74,58 @@ auth.post('/signup', async (c) => {
     })
 
     // 4. Create Initial Profile
+    console.log('--- Step 4: Creating profiles entry');
     await db.insert(profiles).values({
       userId: newUser.id,
       name: name,
     })
 
     // 5. Initialize Credits
+    console.log('--- Step 5: Creating user_credits entry');
     await db.insert(userCredits).values({
       userId: newUser.id,
-      creditsRemaining: 10, // Default signup credits
+      creditsRemaining: 10,
     })
 
     // 6. Create Email Verification Token
+    console.log('--- Step 6: Creating email_verifications entry');
     const verificationToken = crypto.randomUUID()
-    const tokenHash = btoa(verificationToken) // Simple hash for example
+    const tokenHash = btoa(verificationToken)
     await db.insert(emailVerifications).values({
       userId: newUser.id,
       tokenHash: tokenHash,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     })
 
-    // 7. Send verification email
-    const emailResponse = await sendVerificationEmail(c.env.RESEND_API_KEY, email, tokenHash, c.env.API_URL)
+    // 7. Send verification email (Async via waitUntil)
+    console.log('--- Step 7: Queueing verification email');
+    c.executionCtx.waitUntil((async () => {
+      try {
+        const emailResponse = await sendVerificationEmail(c.env.RESEND_API_KEY, email, tokenHash, c.env.API_URL)
+        if (emailResponse.error) {
+          console.error('❌ Verification email failed:', emailResponse.error);
+        } else {
+          console.log('✅ Verification email sent to:', email);
+        }
+      } catch (err) {
+        console.error('❌ Unexpected email error in waitUntil:', err);
+      }
+    })())
 
-    if (emailResponse.error) {
-      console.warn('⚠️ Verification email failed to send, but user was created.')
-    }
-
-    return c.json({ message: 'User created. Please check your email for verification.', userId: newUser.id }, 201)
+    console.log('✨ Signup sequence complete');
+    return c.json({ 
+      message: 'User created. Please check your email for verification.', 
+      userId: newUser.id 
+    }, 201)
 
   } catch (error: any) {
-    console.error('Signup Error:', error)
-    return c.json({ error: 'Internal Server Error' }, 500)
+    console.error('❌ CRITICAL Signup Error:', error);
+    // Return detailed error in response temporarily to help us debug production
+    return c.json({ 
+      error: 'Internal Server Error', 
+      debug: error.message,
+      stack: error.stack 
+    }, 500)
   }
 })
 
