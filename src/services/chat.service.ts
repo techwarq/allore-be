@@ -2,7 +2,7 @@ import { eq, and } from "drizzle-orm";
 import { ChatRepository } from "../db/ChatRepository";
 import { Memory } from "./chat/Memory";
 import { CreativeStudio } from "./chat/CreativeStudio";
-import { companyPreferences } from "../db/schema";
+import { profiles } from "../db/schema";
 
 export interface ChatProcessInput {
   projectId: string;
@@ -89,11 +89,12 @@ export class ChatService {
     }
     
     try {
-      [brandContext] = await this.db
-        .select()
-        .from(companyPreferences)
-        .where(eq(companyPreferences.userId, userId))
+      const [profile] = await this.db
+        .select({ preferences: profiles.preferences })
+        .from(profiles)
+        .where(eq(profiles.userId, userId))
         .limit(1);
+      brandContext = profile?.preferences?.company || null;
     } catch (err) {
       console.warn("[ChatService] Brand context retrieval failed:", err);
     }

@@ -1,10 +1,10 @@
-import { ChatService, type ChatMessage } from "../chat.service";
+import GeminiConnector from "../connectors/gemini.connector";
 
 export class CreativeStudio {
-  private ai: ChatService;
+  private gemini: GeminiConnector;
 
   constructor(apiKey: string) {
-    this.ai = new ChatService(apiKey);
+    this.gemini = new GeminiConnector(apiKey);
   }
 
   /**
@@ -28,19 +28,28 @@ export class CreativeStudio {
         Relevant Memories: ${JSON.stringify(input.userContext.memory)}
         
         Be creative, professional, and visually descriptive.
-      `;
+      `.trim();
 
       // 2. Prepare conversation history for Gemini
-      const messages: ChatMessage[] = input.history.map(h => ({
-        role: h.role === 'user' ? 'user' : 'model', // Gemini uses 'model' instead of 'assistant' in core API
-        content: h.content
+      const contents = input.history.map(h => ({
+        role: h.role === 'user' ? 'user' : 'model',
+        parts: [{ text: h.content }]
       }));
 
       // Add current augmented message
-      messages.push({ role: 'user', content: input.message.content });
+      contents.push({ 
+        role: 'user', 
+        parts: [{ text: input.message.content }] 
+      });
 
-      // 3. Stream from AI service (using Gemini 1.5 Pro for creative reasoning)
-      const stream = this.ai.streamChat(messages, "gemini-1.5-pro");
+      // 3. Stream from Gemini API
+      const stream = this.gemini.streamContent({
+        model: "gemini-1.5-pro",
+        contents,
+        systemInstruction: {
+          parts: [{ text: systemInstruction }]
+        }
+      });
 
       let fullText = "";
       for await (const chunk of stream) {

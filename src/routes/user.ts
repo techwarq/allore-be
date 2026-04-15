@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db'
-import { users, userPreferences, companyPreferences } from '../db/schema'
-import { eq } from 'drizzle-orm'
+import { users, profiles } from '../db/schema'
+import { eq, sql } from 'drizzle-orm'
 import { CompanyResearch } from '../services/company-research.service'
 import { MemoryService } from '../services/memory.service'
 
@@ -30,8 +30,8 @@ export const getUserProfile = async (c: any) => {
       return c.json({ error: 'Profile not found' }, 404)
     }
 
-    // Omit password for safety
-    const { password, ...safeProfile } = profile
+    // User profile (safe fields)
+    const safeProfile = profile
 
     return c.json({ success: true, profile: safeProfile })
   } catch (error) {
@@ -48,10 +48,10 @@ export const updateUserProfile = async (c: any) => {
 
     // Example fields to update safely: name
     if (updates.name) {
-      await db.update(users).set({ 
+      await db.update(profiles).set({ 
         name: updates.name,
         updatedAt: new Date()
-      }).where(eq(users.id, userId))
+      }).where(eq(profiles.userId, userId))
     }
 
     return c.json({ success: true, message: 'Profile updated successfully' })
@@ -70,9 +70,9 @@ export const getUserPreferences = async (c: any) => {
     const userId = c.req.param('userId')
     const db = getDb(c.env.DATABASE_URL)
 
-    const [preferences] = await db.select().from(userPreferences).where(eq(userPreferences.userId, userId)).limit(1)
+    const [profile] = await db.select({ preferences: profiles.preferences }).from(profiles).where(eq(profiles.userId, userId)).limit(1)
 
-    return c.json({ success: true, preferences: preferences || {} })
+    return c.json({ success: true, preferences: (profile?.preferences as any)?.personal || {} })
   } catch (error) {
     console.error('getUserPreferences error:', error)
     return c.json({ error: 'Failed to get preferences' }, 500)
@@ -85,24 +85,17 @@ export const updateUserPreferences = async (c: any) => {
     const updates = await c.req.json()
     const db = getDb(c.env.DATABASE_URL)
 
-    // 1. Check if user prefs exist, insert or update
-    const [existing] = await db.select().from(userPreferences).where(eq(userPreferences.userId, userId)).limit(1)
-
-    if (existing) {
-      await db.update(userPreferences).set({
-        competitors: updates.competitors || existing.competitors,
-        resources: updates.resources || existing.resources,
-        stylePreferences: updates.stylePreferences || existing.stylePreferences,
+    // Merge into profiles.preferences.personal
+    await db.update(profiles)
+      .set({
+        preferences: sql`jsonb_set(
+          COALESCE(${profiles.preferences}, '{}'::jsonb), 
+          '{personal}', 
+          COALESCE(${profiles.preferences}->'personal', '{}'::jsonb) || ${JSON.stringify(updates)}::jsonb
+        )`,
         updatedAt: new Date()
-      }).where(eq(userPreferences.userId, userId))
-    } else {
-      await db.insert(userPreferences).values({
-        userId,
-        competitors: updates.competitors || [],
-        resources: updates.resources || [],
-        stylePreferences: updates.stylePreferences || {}
       })
-    }
+      .where(eq(profiles.userId, userId))
 
     // 2. Trigger background research safely
     const urlsToResearch: { label: string; url: string }[] = []
@@ -133,7 +126,6 @@ export const updateUserPreferences = async (c: any) => {
           let collectiveSummary = ''
           let collectiveImages: any[] = []
 
-          // Simple iteration logic across URLs
           for (const item of urlsToResearch) {
              const results = await researcher.companyUrlResearch(item.url, "Extract key style combinations, specific design aesthetics, color combinations, and high-quality image inspirations.")
              if (results.researchSummary) collectiveSummary += results.researchSummary + '\n'
@@ -142,13 +134,17 @@ export const updateUserPreferences = async (c: any) => {
 
           console.log(`✅ Research completed for user ${userId}`)
           
-          await getDb(c.env.DATABASE_URL).update(userPreferences).set({
-             researchResults: {
-                 summary: collectiveSummary,
-                 images: collectiveImages,
-                 lastUpdated: new Date()
-             }
-          }).where(eq(userPreferences.userId, userId))
+          await getDb(c.env.DATABASE_URL).update(profiles).set({
+             preferences: sql`jsonb_set(
+               ${profiles.preferences}, 
+               '{personal,researchResults}', 
+               ${JSON.stringify({
+                   summary: collectiveSummary,
+                   images: collectiveImages,
+                   lastUpdated: new Date()
+               })}::jsonb
+             )`
+          }).where(eq(profiles.userId, userId))
 
           await researcher.close()
         } catch (error) {
@@ -203,9 +199,9 @@ export const getCompanyPreferences = async (c: any) => {
     const userId = c.req.param('userId')
     const db = getDb(c.env.DATABASE_URL)
 
-    const [preferences] = await db.select().from(companyPreferences).where(eq(companyPreferences.userId, userId)).limit(1)
+    const [profile] = await db.select({ preferences: profiles.preferences }).from(profiles).where(eq(profiles.userId, userId)).limit(1)
 
-    return c.json({ success: true, preferences: preferences || {} })
+    return c.json({ success: true, preferences: (profile?.preferences as any)?.company || {} })
   } catch (error) {
     console.error('getCompanyPreferences error:', error)
     return c.json({ error: 'Failed to get company preferences' }, 500)
@@ -218,27 +214,17 @@ export const updateCompanyPreferences = async (c: any) => {
     const updates = await c.req.json()
     const db = getDb(c.env.DATABASE_URL)
 
-    const [existing] = await db.select().from(companyPreferences).where(eq(companyPreferences.userId, userId)).limit(1)
-
-    if (existing) {
-      await db.update(companyPreferences).set({
-        companyName: updates.companyName || existing.companyName,
-        companyUrls: updates.companyUrls || existing.companyUrls,
-        industry: updates.industry || existing.industry,
-        targetAudience: updates.targetAudience || existing.targetAudience,
-        brandDetails: updates.brandDetails || existing.brandDetails,
+    // Merge into profiles.preferences.company
+    await db.update(profiles)
+      .set({
+        preferences: sql`jsonb_set(
+          COALESCE(${profiles.preferences}, '{}'::jsonb), 
+          '{company}', 
+          COALESCE(${profiles.preferences}->'company', '{}'::jsonb) || ${JSON.stringify(updates)}::jsonb
+        )`,
         updatedAt: new Date()
-      }).where(eq(companyPreferences.userId, userId))
-    } else {
-      await db.insert(companyPreferences).values({
-        userId,
-        companyName: updates.companyName || 'Unknown',
-        companyUrls: updates.companyUrls || [],
-        industry: updates.industry || '',
-        targetAudience: updates.targetAudience || '',
-        brandDetails: updates.brandDetails || {}
       })
-    }
+      .where(eq(profiles.userId, userId))
 
     // Trigger background research safely
     const urlsToResearch: { label: string; url: string }[] = []
@@ -270,14 +256,18 @@ export const updateCompanyPreferences = async (c: any) => {
 
           console.log(`✅ Research completed for company ${userId}`)
           
-          await getDb(c.env.DATABASE_URL).update(companyPreferences).set({
-             brandDetails: {
-                 ...updates.brandDetails,
-                 researchSummary: collectiveSummary,
-                 images: collectiveImages,
-                 lastUpdated: new Date()
-             }
-          }).where(eq(companyPreferences.userId, userId))
+          await getDb(c.env.DATABASE_URL).update(profiles).set({
+             preferences: sql`jsonb_set(
+               ${profiles.preferences}, 
+               '{company,brandDetails}', 
+               ${JSON.stringify({
+                   ...updates.brandDetails,
+                   researchSummary: collectiveSummary,
+                   images: collectiveImages,
+                   lastUpdated: new Date()
+               })}::jsonb
+             )`
+          }).where(eq(profiles.userId, userId))
 
           await researcher.close()
         } catch (error) {

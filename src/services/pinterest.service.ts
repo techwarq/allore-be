@@ -155,7 +155,7 @@ export class PinterestService {
 
     // Save to Database
     console.log(`🗄️  Saving asset reference to database...`);
-    const [asset] = await db.insert((await import('../db/schema')).privateAssets).values({
+    const [asset] = await db.insert((await import('../db/schema')).assets).values({
       userId,
       fileName,
       originalUrl: imageUrl,
