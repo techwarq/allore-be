@@ -41,6 +41,7 @@ export const sessionMiddleware = createMiddleware<{
     .limit(1)
 
     if (!result) {
+      console.warn(`[Auth] Invalid or expired session for token: ${sessionToken.substring(0, 8)}...`);
       return c.json({ error: 'Unauthorized: Invalid or expired session' }, 401)
     }
 

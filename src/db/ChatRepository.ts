@@ -22,25 +22,23 @@ export class ChatRepository {
     let targetChatId = data.chatId;
     
     // 1. Resolve or create chat
-    if (!targetChatId) {
-      const [existingChat] = await this.db
-        .select()
-        .from(chats)
-        .where(eq(chats.projectId, data.projectId))
-        .limit(1);
+    // Ensure the chatId is a valid UUID before using it. 
+    // If it's a virtual ID (like 'user-UUID'), we treat it as undefined to trigger resolution.
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (targetChatId && !uuidRegex.test(targetChatId)) {
+      targetChatId = undefined;
+    }
 
-      if (existingChat) {
-        targetChatId = existingChat.id;
-      } else {
-        const [newChat] = await this.db
-          .insert(chats)
-          .values({
-            projectId: data.projectId,
-            title: 'Conversation',
-          })
-          .returning();
-        targetChatId = newChat.id;
-      }
+    if (!targetChatId) {
+      // Create a brand new chat thread
+      const [newChat] = await this.db
+        .insert(chats)
+        .values({
+          projectId: data.projectId,
+          title: 'Conversation',
+        })
+        .returning();
+      targetChatId = newChat.id;
     }
 
     // 2. Insert message
@@ -55,7 +53,7 @@ export class ChatRepository {
       })
       .returning();
 
-    return newMessage.id;
+    return { messageId: newMessage.id, chatId: targetChatId };
   }
 
   /**
@@ -100,11 +98,36 @@ export class ChatRepository {
       });
   }
 
-  async getMessagesByChatId(chatId: string) {
+  async getMessagesByChatId(chatId: string, fallbackProjectId?: string) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let targetChatId = chatId;
+    
+    if (!uuidRegex.test(chatId)) {
+      if (!fallbackProjectId) return [];
+      
+      const [existingChat] = await this.db
+        .select()
+        .from(chats)
+        .where(eq(chats.projectId, fallbackProjectId))
+        .limit(1);
+        
+      if (!existingChat) return [];
+      targetChatId = existingChat.id;
+    }
+
     return await this.db
       .select()
       .from(messages)
-      .where(eq(messages.chatId, chatId))
+      .where(eq(messages.chatId, targetChatId))
       .orderBy(desc(messages.createdAt));
+  }
+
+  async getProfile(userId: string) {
+    const [profile] = await this.db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.userId, userId))
+      .limit(1);
+    return profile;
   }
 }

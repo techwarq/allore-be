@@ -22,6 +22,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.9",
     "jose": "^6.2.2",
+    "openai": "^6.34.0",
     "playwright": "^1.59.1",
     "resend": "^6.10.0",
     "standardwebhooks": "^1.0.0",

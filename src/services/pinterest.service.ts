@@ -107,7 +107,9 @@ export class PinterestService {
     imageUrl: string,
     metadata: any = {},
     data?: ArrayBuffer,
-    contentType?: string
+    contentType?: string,
+    projectId?: string,
+    chatId?: string
   ): Promise<any> {
     let finalData: any;
     let finalContentType: string;
@@ -157,10 +159,12 @@ export class PinterestService {
     console.log(`🗄️  Saving asset reference to database...`);
     const [asset] = await db.insert((await import('../db/schema')).assets).values({
       userId,
-      fileName,
-      originalUrl: imageUrl,
-      contentType: finalContentType,
-      metadata,
+      projectId,
+      chatId,
+      url: fileName, // Store the R2 key in the 'url' column
+      type: metadata.type || 'image',
+      source: metadata.source || 'ai',
+      metadataJson: { ...metadata, originalUrl: imageUrl },
     }).returning();
     
     console.log(`✅ Asset saved successfully: ${asset.id}`);

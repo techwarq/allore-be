@@ -7,10 +7,22 @@
     "nodejs_compat"
   ],
   "vars": {
-    "ENV": "production",
+    "ENV": "development",
+    "DATABASE_URL": "postgresql://neondb_owner:npg_gknX9ZNuxY1y@ep-bold-cherry-allqdd82-pooler.c-3.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+    "JWT_SECRET": "ASHUHJCBJ09098989776",
+    "RESEND_API_KEY": "re_Q9PDjKQD_KRQ28ZMAsWDYhdJCiQdyYPw4",
+    "API_URL": "https://allore-be.sonalinayak0804.workers.dev",
+    "FRONTEND_URL": "http://localhost:3000",
     "QDRANT_URL": "https://090c9618-7e77-44f2-94d2-d8d994251c88.eu-central-1-0.aws.cloud.qdrant.io",
-    "DODO_PAYMENTS_API_KEY": "wZOidXd9s3mxrqkr.Y_mYl6_Aj3tJI0C97d_q7LURNnmsSflSGLJ97UYF_hv8FxGu",
-    "DODO_WEBHOOK_SECRET": "whsec_U5j/R4RM87lrdR0dLTvkPeWFSP6nAf2/"
+    "DODO_PAYMENTS_API_KEY": "oXTvLYIemv-kNMJW.c1rpNyuAiLD1GqMWziyCDeLO726oP-zhRF1IA1x_b8_FjGX5",
+    "DODO_WEBHOOK_SECRET": "whsec_jl+TDO1d7QqNlk/xND7c3Pivc+2BIb2m",
+    "GEMINI_API_KEY": "AIzaSyBMpqnDVKkVNO3tZIV3i_RylQUIL5uqKTk",
+    "OPENAI_API_KEY": "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",
+    "VERTEX_PROJECT_ID": "gg-guidebooks-ai",
+    "VERTEX_LOCATION": "us-central1",
+    "VERTEX_SERVICE_ACCOUNT_EMAIL": "vertex-express@gg-guidebooks-ai.iam.gserviceaccount.com",
+    "VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDRUR8D6ReE2X9q\nQ0Pn0Jp21Uq6sbRaVS2DwcOf57opd0J2/L5ric9LrSOZvhKZPLv7OcFbWHNwIgXn\n+R3GCt2O6b+TBhwSQ0jZhBq7Z+9TilI4VUuSJmHdr74TtKEyT5NsKsHebYz0zUn+\nuxn7sRZ0g8RG9+qPC/HF5+adM9yOe22aMsOcGewn+aCPykdJs4NLTnp/EtxY8sfE\nI3Co8nestDZwelDLXAgOuTm17pEj83m4bvbWNGLbwkoG6cNDi1RHUbwkw2jbIJh8\nVbP4+IptLK6bpX6FPuilRQoIed6ynxi9SFWE0eEeEHMaX80dYftEE0O7WL0tIcaR\nnbUjz7YVAgMBAAECggEACcNTFYP3hRO1ZeoVINHNPN/XPPgjo04hDUVFmRj5pIwy\njTc5Z1thGTSXY0kHE3qFXcwyMM8G2IMDdRSl3e/xqN+W7dhnwBF2D+fGSEdPHr2c\n9tr4wr61tEtJh0TEeydUmVXnyEjrYhtnu36vUVrPh9EB1rnZrY7PIwcLEmffoulP\nq9L8WVWN1O9u3Kg6CfPj5UypCstasjwA4RuMa46vJ2WPHk8P1aP78ybwb5We72+0\nyR/JsUYvs9mIcVwcyPbG/KDIVscb9XjkGKhLrNwt+M9PeCJVND1UkODaWTdTnH0q\nDhbnghCJKwv031GBWakLgFrbD7ORYUvbve+tRK8TXwKBgQD4cSKtiFco87qcqIOg\nIRyVsX2ioauCcONr4xkRTfxSGKff3KvFrldczpvpkr/16pf9cm3ZBKvLFbqCXdNd\nJXPL3NUQoC+lmKuUKcL3QZBgFN6vuZsbwF1k0ImAiAIexfrE3H+4xMAjZJuICPqv\n4LCJm/5yFgDuMks7pmh6LjcDWwKBgQDXr0erI9Sig2hl1tqbg7ajtQkD/Ge5Dgp9\n8wKx+13EcppYAxxjIW+pWs21hkTt9l73YSHxcdsD0UrweQX+/klOquiZofJ8ZuHU\ncEJMlq99sXFeKDVIzRRRiOS78TtdJBiQ+yA17BND1YmrrXIll5AIauKpLD0IPrhI\nTvJex4GXTwKBgQDeaurQ0K63SvxWI8czJHGi0jPX1UTmkooHnFhk1Zx/IvOnxrdB\nUsODorSSd37DejJ4BGmzUCs8tUc0TytayJzSdfGJ4N7HMdbp3jldgqTuX8C9MT1b\nquvxxYBUQW8kfbnzZDQ0BnC9PuS+9Mr5if6CM9Wn7WsH1J7l2CTQvW8i4QKBgDOP\niG+GMkfjaCqoUTxKIXhDR/N2/IjFrYZseKF5uPHEf9c4bynXjW0L8w9JGONWOV+k\nDcw9bqEcAHE6TU+nFHlE7DQF/gT1R1lUuNS8VRmUOMjMjehodkoDksLHKWzbuy+1\niP66/+QAgVfUL+yCrgEFJEhS9ggpjj5i+RflU7qLAoGAISPkb/4uIw9a91j/w27t\nMzClaVf8Pb1FqNPGOw0T1ZbjNJA/WhykwfKhov4XkanZw8R5hh4HVsnOCG20yTRs\nT0+w4FHRDEZMtTGfZ1IIZcHcMZkun5BcHZEjxM0F4ZmFylZWWHYVQCv2Zq7U4p7I\n85RvTjnM32AzZtYEne494+w=\n-----END PRIVATE KEY-----\n",
+    "QDRANT_API_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.E13BRGKvepZ7KBRbhRjGQJ4PsBvL9kv9q13eudoLPAQ"
   },
   "env": {
     "dev": {
@@ -22,7 +34,80 @@
     "production": {
       "name": "allore-be-prod",
       "vars": {
-        "ENV": "production"
+        "ENV": "production",
+        "DATABASE_URL": "postgresql://neondb_owner:npg_gknX9ZNuxY1y@ep-bold-cherry-allqdd82-pooler.c-3.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+        "JWT_SECRET": "ASHUHJCBJ09098989776",
+        "RESEND_API_KEY": "re_Q9PDjKQD_KRQ28ZMAsWDYhdJCiQdyYPw4",
+        "API_URL": "https://allore-be-prod.sonalinayak0804.workers.dev",
+        "FRONTEND_URL": "https://www.alloreai.com",
+        "QDRANT_URL": "https://090c9618-7e77-44f2-94d2-d8d994251c88.eu-central-1-0.aws.cloud.qdrant.io",
+        "DODO_PAYMENTS_API_KEY": "oXTvLYIemv-kNMJW.c1rpNyuAiLD1GqMWziyCDeLO726oP-zhRF1IA1x_b8_FjGX5",
+        "DODO_WEBHOOK_SECRET": "whsec_jl+TDO1d7QqNlk/xND7c3Pivc+2BIb2m",
+        "GEMINI_API_KEY": "AIzaSyA6pL5GGT0V1vMTVd5ispdS9pKU-lTe5Yg",
+        "VERTEX_PROJECT_ID": "gg-guidebooks-ai",
+        "VERTEX_LOCATION": "us-central1",
+        "VERTEX_SERVICE_ACCOUNT_EMAIL": "vertex-express@gg-guidebooks-ai.iam.gserviceaccount.com",
+        "VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDRUR8D6ReE2X9q\nQ0Pn0Jp21Uq6sbRaVS2DwcOf57opd0J2/L5ric9LrSOZvhKZPLv7OcFbWHNwIgXn\n+R3GCt2O6b+TBhwSQ0jZhBq7Z+9TilI4VUuSJmHdr74TtKEyT5NsKsHebYz0zUn+\nuxn7sRZ0g8RG9+qPC/HF5+adM9yOe22aMsOcGewn+aCPykdJs4NLTnp/EtxY8sfE\nI3Co8nestDZwelDLXAgOuTm17pEj83m4bvbWNGLbwkoG6cNDi1RHUbwkw2jbIJh8\nVbP4+IptLK6bpX6FPuilRQoIed6ynxi9SFWE0eEeEHMaX80dYftEE0O7WL0tIcaR\nnbUjz7YVAgMBAAECggEACcNTFYP3hRO1ZeoVINHNPN/XPPgjo04hDUVFmRj5pIwy\njTc5Z1thGTSXY0kHE3qFXcwyMM8G2IMDdRSl3e/xqN+W7dhnwBF2D+fGSEdPHr2c\n9tr4wr61tEtJh0TEeydUmVXnyEjrYhtnu36vUVrPh9EB1rnZrY7PIwcLEmffoulP\nq9L8WVWN1O9u3Kg6CfPj5UypCstasjwA4RuMa46vJ2WPHk8P1aP78ybwb5We72+0\nyR/JsUYvs9mIcVwcyPbG/KDIVscb9XjkGKhLrNwt+M9PeCJVND1UkODaWTdTnH0q\nDhbnghCJKwv031GBWakLgFrbD7ORYUvbve+tRK8TXwKBgQD4cSKtiFco87qcqIOg\nIRyVsX2ioauCcONr4xkRTfxSGKff3KvFrldczpvpkr/16pf9cm3ZBKvLFbqCXdNd\nJXPL3NUQoC+lmKuUKcL3QZBgFN6vuZsbwF1k0ImAiAIexfrE3H+4xMAjZJuICPqv\n4LCJm/5yFgDuMks7pmh6LjcDWwKBgQDXr0erI9Sig2hl1tqbg7ajtQkD/Ge5Dgp9\n8wKx+13EcppYAxxjIW+pWs21hkTt9l73YSHxcdsD0UrweQX+/klOquiZofJ8ZuHU\ncEJMlq99sXFeKDVIzRRRiOS78TtdJBiQ+yA17BND1YmrrXIll5AIauKpLD0IPrhI\nTvJex4GXTwKBgQDeaurQ0K63SvxWI8czJHGi0jPX1UTmkooHnFhk1Zx/IvOnxrdB\nUsODorSSd37DejJ4BGmzUCs8tUc0TytayJzSdfGJ4N7HMdbp3jldgqTuX8C9MT1b\nquvxxYBUQW8kfbnzZDQ0BnC9PuS+9Mr5if6CM9Wn7WsH1J7l2CTQvW8i4QKBgDOP\niG+GMkfjaCqoUTxKIXhDR/N2/IjFrYZseKF5uPHEf9c4bynXjW0L8w9JGONWOV+k\nDcw9bqEcAHE6TU+nFHlE7DQF/gT1R1lUuNS8VRmUOMjMjehodkoDksLHKWzbuy+1\niP66/+QAgVfUL+yCrgEFJEhS9ggpjj5i+RflU7qLAoGAISPkb/4uIw9a91j/w27t\nMzClaVf8Pb1FqNPGOw0T1ZbjNJA/WhykwfKhov4XkanZw8R5hh4HVsnOCG20yTRs\nT0+w4FHRDEZMtTGfZ1IIZcHcMZkun5BcHZEjxM0F4ZmFylZWWHYVQCv2Zq7U4p7I\n85RvTjnM32AzZtYEne494+w=\n-----END PRIVATE KEY-----\n",
+        "QDRANT_API_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.E13BRGKvepZ7KBRbhRjGQJ4PsBvL9kv9q13eudoLPAQ",
+        "OPENAI_API_KEY": "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"
+      },
+      "r2_buckets": [
+        {
+          "binding": "ASSETS_BUCKET",
+          "bucket_name": "allore-assets"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "GLOBAL_LIMITER",
+            "class_name": "GlobalLimiter"
+          },
+          {
+            "name": "CHAT_SESSION",
+            "class_name": "ChatSession"
+          },
+          {
+            "name": "RESPONSER",
+            "class_name": "Responser"
+          }
+        ]
+      },
+      "queues": {
+        "producers": [
+          {
+            "binding": "CHAT_QUEUE",
+            "queue": "allore-chat-logs"
+          },
+          {
+            "binding": "LLM_QUEUE",
+            "queue": "llm-queue"
+          },
+          {
+            "binding": "IMAGE_QUEUE",
+            "queue": "image-gen-queue"
+          },
+          {
+            "binding": "VIDEO_QUEUE",
+            "queue": "video-gen-queue"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "llm-queue",
+            "max_batch_size": 5,
+            "max_batch_timeout": 2
+          },
+          {
+            "queue": "image-gen-queue",
+            "max_batch_size": 1,
+            "max_concurrency": 1
+          },
+          {
+            "queue": "video-gen-queue",
+            "max_batch_size": 1
+          }
+        ]
       }
     }
   },
@@ -41,23 +126,67 @@
       {
         "name": "CHAT_SESSION",
         "class_name": "ChatSession"
+      },
+      {
+        "name": "RESPONSER",
+        "class_name": "Responser"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_classes": [
+      "new_sqlite_classes": [
         "GlobalLimiter",
         "ChatSession"
       ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "Responser"
+      ]
     }
   ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
   "queues": {
     "producers": [
       {
         "binding": "CHAT_QUEUE",
         "queue": "allore-chat-logs"
+      },
+      {
+        "binding": "LLM_QUEUE",
+        "queue": "llm-queue"
+      },
+      {
+        "binding": "IMAGE_QUEUE",
+        "queue": "image-gen-queue"
+      },
+      {
+        "binding": "VIDEO_QUEUE",
+        "queue": "video-gen-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "llm-queue",
+        "max_batch_size": 5,
+        "max_batch_timeout": 2
+      },
+      {
+        "queue": "image-gen-queue",
+        "max_batch_size": 1,
+        "max_concurrency": 1
+      },
+      {
+        "queue": "video-gen-queue",
+        "max_batch_size": 1
       }
     ]
   }

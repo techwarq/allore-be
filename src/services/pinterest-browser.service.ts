@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
-import GeminiConnector from "./connectors/gemini.connector";
+import { TextService } from "./gemini/TextService";
 
 export interface PinterestBrowserPin {
   imageUrl: string;
@@ -12,28 +12,38 @@ export class PinterestBrowserService {
   private stagehand: Stagehand;
   private apiKey: string;
   private browserbaseApiKey: string;
-  private projectId: string;
+  private vertexProjectId: string;
+  private vertexLocation: string;
   private stagehandEnv: "BROWSERBASE" | "LOCAL";
   private email?: string;
   private password?: string;
   private cookieString?: string;
+  private serviceAccountEmail?: string;
+  private privateKey?: string;
 
   constructor(
     apiKey: string,
     browserbaseApiKey: string,
-    projectId: string = "default",
+    vertexProjectId: string,
+    vertexLocation: string,
+    browserbaseProjectId: string = "default",
     stagehandEnv: "BROWSERBASE" | "LOCAL" = "BROWSERBASE",
-    email?: string,
     password?: string,
-    cookieString?: string
+    cookieString?: string,
+    serviceAccountEmail?: string,
+    privateKey?: string
   ) {
     this.apiKey = apiKey;
     this.browserbaseApiKey = browserbaseApiKey;
-    this.projectId = projectId;
+    this.vertexProjectId = vertexProjectId;
+    this.vertexLocation = vertexLocation;
+    this.projectId = browserbaseProjectId;
     this.stagehandEnv = stagehandEnv;
     this.email = email;
     this.password = password;
     this.cookieString = cookieString;
+    this.serviceAccountEmail = serviceAccountEmail;
+    this.privateKey = privateKey;
 
     this.stagehand = new Stagehand({
       env: this.stagehandEnv,
@@ -41,7 +51,7 @@ export class PinterestBrowserService {
       projectId: (this.stagehandEnv === "BROWSERBASE" && this.projectId && this.projectId !== "default") ? this.projectId : undefined,
       verbose: 1,
       model: { 
-        modelName: "google/gemini-1.5-flash", // Using gemini-1.5-flash for reliability
+        modelName: "google/gemini-1.5-flash", 
         apiKey: this.apiKey 
       },
     });
@@ -147,8 +157,8 @@ export class PinterestBrowserService {
 
       if (!base64Data) return "Analysis failed: Could not fetch image data.";
 
-      const connector = new GeminiConnector(this.apiKey);
-      const result = await connector.generateContent({
+      const connector = new TextService(this.apiKey, this.vertexProjectId, this.vertexLocation, this.serviceAccountEmail, this.privateKey);
+      const analysis = await connector.generateText({
         contents: [{
           role: "user",
           parts: [
@@ -156,9 +166,8 @@ export class PinterestBrowserService {
             { inlineData: { mimeType: mimeType || "image/jpeg", data: base64Data } },
           ],
         }],
-      });
+      }) || "No analysis.";
 
-      const analysis = result.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis.";
       console.log(`✅ Analysis complete for: ${imageUrl.substring(0, 50)}...`);
       return analysis;
     } catch (error: any) {

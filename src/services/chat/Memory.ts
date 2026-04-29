@@ -5,9 +5,9 @@ export class Memory {
   private memoryService: MemoryService;
   private embeddingService: EmbeddingService;
 
-  constructor(qdrantUrl: string, qdrantKey: string, geminiKey: string) {
+  constructor(qdrantUrl: string, qdrantKey: string, geminiKey: string, projectId: string, location: string, serviceAccountEmail?: string, privateKey?: string) {
     this.memoryService = new MemoryService(qdrantUrl, qdrantKey);
-    this.embeddingService = new EmbeddingService(geminiKey);
+    this.embeddingService = new EmbeddingService(geminiKey, projectId, location, serviceAccountEmail, privateKey);
   }
 
   async retrieve(userId: string, query: string) {

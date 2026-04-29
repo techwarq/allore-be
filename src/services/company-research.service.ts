@@ -8,10 +8,19 @@ export class CompanyResearch {
     private pinterestService: PinterestBrowserService | null = null;
     private apiKey: string;
     private browserbaseApiKey: string;
+    private projectId: string;
+    private location: string;
 
-    constructor(apiKey: string = process.env.GEMINI_API_KEY || "", browserbaseApiKey: string = process.env.BROWSERBASE_API_KEY || "") {
+    constructor(
+        apiKey: string = process.env.GEMINI_API_KEY || "", 
+        browserbaseApiKey: string = process.env.BROWSERBASE_API_KEY || "",
+        projectId: string = process.env.VERTEX_PROJECT_ID || "",
+        location: string = process.env.VERTEX_LOCATION || ""
+    ) {
         this.apiKey = apiKey;
         this.browserbaseApiKey = browserbaseApiKey;
+        this.projectId = projectId;
+        this.location = location;
     }
 
     async init() {
@@ -19,6 +28,8 @@ export class CompanyResearch {
         this.pinterestService = new PinterestBrowserService(
             this.apiKey,
             this.browserbaseApiKey,
+            this.projectId,
+            this.location,
             "default",
             (process.env.STAGEHAND_ENV as any) || "LOCAL",
             process.env.PINTEREST_EMAIL,

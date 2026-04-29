@@ -10,6 +10,8 @@ type Bindings = {
   QDRANT_URL: string
   QDRANT_API_KEY: string
   GEMINI_API_KEY: string
+  VERTEX_PROJECT_ID: string
+  VERTEX_LOCATION: string
   BROWSERBASE_API_KEY: string
 }
 
@@ -24,16 +26,25 @@ export const getUserProfile = async (c: any) => {
     const userId = c.req.param('userId')
     const db = getDb(c.env.DATABASE_URL)
 
-    const [profile] = await db.select().from(users).where(eq(users.id, userId)).limit(1)
+    // Join users and profiles to get full user context including onboarding status
+    const [result] = await db.select()
+      .from(users)
+      .leftJoin(profiles, eq(users.id, profiles.userId))
+      .where(eq(users.id, userId))
+      .limit(1)
 
-    if (!profile) {
+    if (!result) {
       return c.json({ error: 'Profile not found' }, 404)
     }
 
-    // User profile (safe fields)
-    const safeProfile = profile
+    // Merge user and profile data into a single object
+    const fullProfile = {
+      ...result.users,
+      ...(result.profiles || {}),
+      userId: result.users.id // Ensure userId is explicitly present
+    }
 
-    return c.json({ success: true, profile: safeProfile })
+    return c.json({ success: true, profile: fullProfile })
   } catch (error) {
     console.error('getUserProfile error:', error)
     return c.json({ error: 'Failed to get profile' }, 500)
@@ -46,12 +57,31 @@ export const updateUserProfile = async (c: any) => {
     const updates = await c.req.json()
     const db = getDb(c.env.DATABASE_URL)
 
-    // Example fields to update safely: name
+    // Fields that can be updated in the profiles table
+    const profileFields: any = {
+      updatedAt: new Date()
+    }
+
+    if (updates.name !== undefined) profileFields.name = updates.name
+    if (updates.userType !== undefined) profileFields.userType = updates.userType
+    if (updates.companyName !== undefined) profileFields.companyName = updates.companyName
+    if (updates.goals !== undefined) profileFields.goals = updates.goals
+    if (updates.targetAudience !== undefined) profileFields.targetAudience = updates.targetAudience
+    if (updates.industry !== undefined) profileFields.industry = updates.industry
+    if (updates.competitors !== undefined) profileFields.competitors = updates.competitors
+    if (updates.resources !== undefined) profileFields.inspiration = updates.resources
+    if (updates.moreDetails !== undefined) profileFields.extraDetails = updates.moreDetails
+    if (updates.brandingKitUrl !== undefined) profileFields.brandingKitUrl = updates.brandingKitUrl
+    if (updates.onboardingCompleted !== undefined) profileFields.onboardingCompleted = updates.onboardingCompleted
+
+    // Perform the update
+    await db.update(profiles)
+      .set(profileFields)
+      .where(eq(profiles.userId, userId))
+
+    // Also update name in users table if it was provided
     if (updates.name) {
-      await db.update(profiles).set({ 
-        name: updates.name,
-        updatedAt: new Date()
-      }).where(eq(profiles.userId, userId))
+      await db.update(users).set({ updatedAt: new Date() }).where(eq(users.id, userId))
     }
 
     return c.json({ success: true, message: 'Profile updated successfully' })
@@ -120,7 +150,7 @@ export const updateUserPreferences = async (c: any) => {
       c.executionCtx.waitUntil((async () => {
         try {
           console.log(`🔍 Starting background research for user ${userId} with ${urlsToResearch.length} URLs`)
-          const researcher = new CompanyResearch(c.env.GEMINI_API_KEY, c.env.BROWSERBASE_API_KEY)
+          const researcher = new CompanyResearch(c.env.GEMINI_API_KEY, c.env.BROWSERBASE_API_KEY, c.env.VERTEX_PROJECT_ID, c.env.VERTEX_LOCATION)
           await researcher.init()
           
           let collectiveSummary = ''
@@ -241,7 +271,7 @@ export const updateCompanyPreferences = async (c: any) => {
       c.executionCtx.waitUntil((async () => {
         try {
           console.log(`🔍 Starting background research for company ${userId} with ${urlsToResearch.length} URLs`)
-          const researcher = new CompanyResearch(c.env.GEMINI_API_KEY, c.env.BROWSERBASE_API_KEY)
+          const researcher = new CompanyResearch(c.env.GEMINI_API_KEY, c.env.BROWSERBASE_API_KEY, c.env.VERTEX_PROJECT_ID, c.env.VERTEX_LOCATION)
           await researcher.init()
           
           let collectiveSummary = ''

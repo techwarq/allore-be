@@ -12,6 +12,10 @@ const pinterest = new Hono<{
     BROWSERBASE_API_KEY: string,
     BROWSERBASE_PROJECT_ID: string,
     GEMINI_API_KEY: string,
+    VERTEX_PROJECT_ID: string,
+    VERTEX_LOCATION: string,
+    VERTEX_SERVICE_ACCOUNT_EMAIL: string,
+    VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: string,
     STAGEHAND_ENV?: "BROWSERBASE" | "LOCAL"
   },
   Variables: AuthVariables 
@@ -34,8 +38,15 @@ pinterest.post('/search', async (c) => {
   const browserService = new PinterestBrowserService(
     c.env.GEMINI_API_KEY,
     c.env.BROWSERBASE_API_KEY,
+    c.env.VERTEX_PROJECT_ID,
+    c.env.VERTEX_LOCATION,
     c.env.BROWSERBASE_PROJECT_ID,
-    c.env.STAGEHAND_ENV
+    c.env.STAGEHAND_ENV,
+    undefined, // email
+    undefined, // password
+    undefined, // cookieString
+    c.env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+    c.env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY
   )
 
   try {
@@ -84,8 +95,15 @@ pinterest.post('/save', async (c) => {
         const browserService = new PinterestBrowserService(
           c.env.GEMINI_API_KEY,
           c.env.BROWSERBASE_API_KEY,
+          c.env.VERTEX_PROJECT_ID,
+          c.env.VERTEX_LOCATION,
           c.env.BROWSERBASE_PROJECT_ID,
-          c.env.STAGEHAND_ENV
+          c.env.STAGEHAND_ENV,
+          undefined, // email
+          undefined, // password
+          undefined, // cookieString
+          c.env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+          c.env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY
         )
         
         try {

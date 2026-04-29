@@ -1,6 +1,7 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
-import GeminiConnector from "./connectors/gemini.connector";
+import { TextService } from "./gemini/TextService";
+import { ImageService } from "./gemini/ImageService";
 import { CompanyResearch } from "./company-research.service";
 import { convertGeminiImagesToStorage } from "./image-storage.helper";
 
@@ -91,11 +92,19 @@ export interface EngineRequest {
 
 export class Engine {
     private apiKey: string;
+    private projectId: string;
+    private location: string;
+    private textService: TextService;
+    private imageService: ImageService;
     private companyResearch: CompanyResearch;
 
-    constructor(apiKey: string) {
+    constructor(apiKey: string, projectId: string, location: string) {
         this.apiKey = apiKey;
-        this.companyResearch = new CompanyResearch(apiKey);
+        this.projectId = projectId;
+        this.location = location;
+        this.textService = new TextService(apiKey, projectId, location);
+        this.imageService = new ImageService(apiKey, projectId, location);
+        this.companyResearch = new CompanyResearch(apiKey, "", projectId, location);
     }
 
     async init() {
@@ -115,7 +124,6 @@ export class Engine {
     ): Promise<any> {
         console.log("🧠 Planning research based on branding kit...");
         progressCallback?.({ step: 'planning', message: 'Analyzing branding kit to plan research...', progress: 5 });
-        const connector = new GeminiConnector(this.apiKey);
         const brandingKit = request.preferences.brandingKitUpload;
 
         const prompt = `
@@ -141,8 +149,8 @@ Output **strict JSON only**, no additional text.
 }
 `;
 
-        const response = await connector.generateContent({
-            model: "gemini-1.5-flash", // Use stable flash for fast planning
+        const response: any = await this.textService.generateText({
+            model: "gemini-3-flash-preview", // Use stable flash for fast planning
             contents: [
                 {
                     role: "user",
@@ -163,7 +171,7 @@ Output **strict JSON only**, no additional text.
             ],
         });
 
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+        const text = response;
         try {
             const cleanText = text.replace(/```json/g, "").replace(/```/g, "").trim();
             return JSON.parse(cleanText);
@@ -197,7 +205,6 @@ Output **strict JSON only**, no additional text.
         if (modelImages.length === 0) throw new Error("No model images provided");
         if (modelImages.length === 1) return modelImages[0];
 
-        const connector = new GeminiConnector(this.apiKey);
         const parts: any[] = [{ text: `Select the best model image for a photoshoot with this vibe: "${vibe}". Return ONLY the index (0-based) of the best image.` }];
 
         for (let i = 0; i < Math.min(modelImages.length, 5); i++) {
@@ -217,15 +224,15 @@ Output **strict JSON only**, no additional text.
             }
         }
 
-        const response = await connector.generateContent({
-            model: "gemini-1.5-flash",
+        const response: any = await this.textService.generateText({
+            model: "gemini-3-flash-preview",
             contents: [{ role: "user", parts }],
             config: {
                 temperature: 0.1
             }
         });
 
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "0";
+        const text = response;
         const index = parseInt(text.match(/\d+/)?.[0] || "0");
 
         return modelImages[index] || modelImages[0];
@@ -242,7 +249,6 @@ Output **strict JSON only**, no additional text.
     ): Promise<any> {
         console.log("✍️ Generating photoshoot prompts...");
         progressCallback?.({ step: 'prompts', message: 'Generating creative photoshoot concepts...', progress: 110 });
-        const connector = new GeminiConnector(this.apiKey);
 
         const prompt = `
 You are a senior fashion photographer and creative director.
@@ -263,8 +269,8 @@ Your prompts must explicitly preserve the look of the reference model.
 Output JSON only.
 `;
 
-        const response = await connector.generateContent({
-            model: "gemini-1.5-pro", // Deeper reasoning for prompts
+        const response: any = await this.textService.generateText({
+            model: "gemini-3-flash-preview", // Deeper reasoning for prompts
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             config: {
                 temperature: 1.0,
@@ -272,7 +278,7 @@ Output JSON only.
             }
         });
 
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+        const text = response;
         try {
             const cleanText = text.replace(/```json/g, "").replace(/```/g, "").trim();
             return JSON.parse(cleanText);
@@ -294,23 +300,21 @@ Output JSON only.
         db?: any,
         bucket?: any
     ): Promise<ImageStory[]> {
-        console.log(`🎨 Generating ${prompts.length} ${categoryName || 'images'}...`);
         progressCallback?.({ step: 'generating', message: `Generating ${categoryName || 'images'}...`, progress: 120 });
-        const connector = new GeminiConnector(this.apiKey);
         const results: ImageStory[] = [];
 
         for (const p of prompts) {
             try {
                 // Pass prompt and model image for identity preservation
-                const response = await connector.generateContent({
-                    model: "gemini-3-pro-image-preview", 
+                const response: any = await this.textService.generateText({
+                    model: "gemini-3-pro-image-preview",
                     contents: [
                         {
                             role: "user",
                             parts: [
                                 { text: p.prompt },
-                                (selectedModel.startsWith('http') 
-                                    ? { text: `[Identity Image Reference: ${selectedModel}]` } 
+                                (selectedModel.startsWith('http')
+                                    ? { text: `[Identity Image Reference: ${selectedModel}]` }
                                     : { inlineData: { mimeType: "image/jpeg", data: selectedModel } })
                             ]
                         }

@@ -120,12 +120,7 @@ auth.post('/signup', async (c) => {
 
   } catch (error: any) {
     console.error('❌ CRITICAL Signup Error:', error);
-    // Return detailed error in response temporarily to help us debug production
-    return c.json({ 
-      error: 'Internal Server Error', 
-      debug: error.message,
-      stack: error.stack 
-    }, 500)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -178,10 +173,10 @@ auth.post('/login', async (c) => {
     ipAddress: c.req.header('x-real-ip') || c.req.header('cf-connecting-ip'),
   }).returning()
 
-  setCookie(c, 'auth_session', session.sessionToken, {
+    setCookie(c, 'auth_session', session.sessionToken, {
     httpOnly: true,
     secure: true,
-    sameSite: 'Lax',
+    sameSite: 'None',
     path: '/',
     maxAge: 7 * 24 * 60 * 60,
   })
@@ -235,8 +230,8 @@ auth.get('/google', async (c) => {
   const codeVerifier = generateCodeVerifier()
   const url = await google.createAuthorizationURL(state, codeVerifier, ['profile', 'email'])
 
-  setCookie(c, 'google_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: 60 * 10 })
-  setCookie(c, 'google_code_verifier', codeVerifier, { httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: 60 * 10 })
+  setCookie(c, 'google_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'None', path: '/', maxAge: 60 * 10 })
+  setCookie(c, 'google_code_verifier', codeVerifier, { httpOnly: true, secure: true, sameSite: 'None', path: '/', maxAge: 60 * 10 })
 
   return c.redirect(url.toString())
 })

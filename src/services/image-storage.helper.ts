@@ -26,6 +26,8 @@ export async function convertGeminiImagesToStorage(
   options: {
     filenamePrefix: string;
     userId: string;
+    projectId?: string;
+    chatId?: string;
     metadata?: any;
     db?: any;     // Database instance from Cloudflare Bindings
     bucket?: any; // R2 Bucket from Cloudflare Bindings
@@ -64,13 +66,15 @@ export async function convertGeminiImagesToStorage(
         `${filenamePrefix}-${i}`,
         { ...metadata, source: 'gemini-engine' },
         bytes.buffer,
-        img.mimeType
+        img.mimeType,
+        options.projectId,
+        options.chatId
       );
 
       results.push({
         id: asset.id,
-        fileUrl: asset.fileName,
-        signedUrl: asset.fileName, // In a real worker, this would be a public/signed URL
+        fileUrl: asset.url,
+        signedUrl: asset.url,
       });
     } catch (error) {
       console.error(`❌ Failed to store Gemini image ${i}:`, error);

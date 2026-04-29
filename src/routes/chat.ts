@@ -4,6 +4,8 @@ import { getDb } from '../db'
 import { BillingService } from '../services/billing.service'
 import { ChatService } from '../services/chat.service'
 import { sessionMiddleware } from '../middleware/auth'
+import { profiles } from '../db/schema'
+import { eq } from 'drizzle-orm'
 
 const chat = new Hono<{ 
   Bindings: { 
@@ -13,9 +15,14 @@ const chat = new Hono<{
     QDRANT_API_KEY: string,
     GLOBAL_LIMITER: any,
     CHAT_SESSION: any,
+    RESPONSER: any,
     CHAT_QUEUE: any,
     DODO_PAYMENTS_API_KEY: string,
-    ENV: string
+    ENV: string,
+    VERTEX_PROJECT_ID: string,
+    VERTEX_LOCATION: string,
+    VERTEX_SERVICE_ACCOUNT_EMAIL: string,
+    VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: string
   },
   Variables: {
     user: any
@@ -28,7 +35,7 @@ const chat = new Hono<{
 chat.post('/', sessionMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json()
-  const { message, projectId, sessionId, model: requestedModel } = body
+  const { message, projectId, sessionId, attachments, model: requestedModel } = body
 
   if (!message || !projectId) {
     return c.json({ error: 'Missing message or projectId.' }, 400)
@@ -50,7 +57,11 @@ chat.post('/', sessionMiddleware, async (c) => {
       DB: db,
       QDRANT_URL: c.env.QDRANT_URL,
       QDRANT_API_KEY: c.env.QDRANT_API_KEY,
-      GEMINI_API_KEY: c.env.GEMINI_API_KEY
+      GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+      VERTEX_PROJECT_ID: c.env.VERTEX_PROJECT_ID,
+      VERTEX_LOCATION: c.env.VERTEX_LOCATION,
+      VERTEX_SERVICE_ACCOUNT_EMAIL: c.env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+      VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: c.env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY
     })
 
     // 2. Billing & Plan Check
@@ -60,79 +71,82 @@ chat.post('/', sessionMiddleware, async (c) => {
       return c.json({ error: access.error }, 403)
     }
 
-    // 3. Session Lock
-    const sid = sessionId || `user-${user.id}`
-    const sessionObjectId = c.env.CHAT_SESSION.idFromName(sid)
-    const chatSession = c.env.CHAT_SESSION.get(sessionObjectId)
-    const rayId = c.req.header('cf-ray') || Math.random().toString(36)
+    // 3. Connect to Responser DO
+    const sid = sessionId || `${projectId}-${user.id}`
+    const responserId = c.env.RESPONSER.idFromName(sid)
+    const responser = c.env.RESPONSER.get(responserId)
     
-    const lockResult: any = await chatSession.lock(rayId)
-    if (!lockResult.success) {
-      await limiter.decrement()
-      return c.json({ error: lockResult.message }, 429)
-    }
+    const [profile] = await db.select().from(profiles).where(eq(profiles.userId, user.id)).limit(1);
+    const brandContext = profile ? {
+      companyName: profile.companyName,
+      industry: profile.industry,
+      extraDetails: profile.extraDetails,
+      goals: profile.goals,
+      targetAudience: profile.targetAudience,
+      userType: profile.userType,
+      preferences: (profile.preferences as any)?.company || {}
+    } : {};
+
+    // setContext is now idempotent and handles history loading internally
+    await responser.setContext(brandContext, user.id, projectId);
+
+    const releaseLimiter = () => limiter.decrement().catch(console.error);
 
     // 4. Stream Response
     return streamSSE(c, async (stream) => {
-      let totalContent = ""
-      let finalModel = requestedModel || ai.getModelForBudget(access.credits || 0)
+      let totalTokens = 0;
+      let finalModel = requestedModel || 'gemini-flash';
+      let streamSuccess = false;
 
       try {
-        const generator = ai.processMessage({
-          projectId,
-          userId: user.id,
-          message,
-          sessionId: sid
-        })
+        const TIMEOUT_MS = 120_000;
+        const readable: ReadableStream = await Promise.race([
+          responser.process(message, attachments || []),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Response timeout')), TIMEOUT_MS)
+          )
+        ]);
+        
+        const reader = readable.getReader();
+        const decoder = new TextDecoder();
 
-        for await (const event of generator as any) {
-          // Handle specific event types
-          if (event.type === 'delta' && event.text) {
-            totalContent += event.text
-          }
-
-          // Forward event to client
-          await stream.writeSSE({
-            data: JSON.stringify(event),
-            event: 'message'
-          })
-
-          if (event.type === 'error' && event.message) throw new Error(event.message)
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          await stream.write(value);
+          
+          const text = decoder.decode(value, { stream: true });
+          const match = text.match(/"type":"done".*?"tokens":(\d+)/);
+          if (match) totalTokens = parseInt(match[1], 10);
         }
 
-        // 5. Usage Tracking
-        const tokens = ai.estimateTokens(totalContent)
-        const cost = ai.estimateCost(tokens, finalModel)
-
-        if (c.env.CHAT_QUEUE) {
-          await c.env.CHAT_QUEUE.send({
-            userId: user.id,
-            tokens,
-            cost,
-            model: finalModel,
-            timestamp: new Date().toISOString()
-          })
-        }
-
-        await billing.recordUsage(user.id, tokens, cost)
-
-        await stream.writeSSE({
-          data: JSON.stringify({ type: 'done', tokens, cost }),
-          event: 'message'
-        })
+        streamSuccess = true;
 
       } catch (err: any) {
-        console.error("Chat Stream Error:", err)
-        await stream.writeSSE({
-          data: JSON.stringify({ type: 'error', message: err.message || 'Stream failed' }),
-          event: 'error'
-        })
+        console.error("Chat Stream Error:", err);
+        const errPayload = `data: ${JSON.stringify({ type: 'error', message: err.message || 'Stream failed' })}\n\n`;
+        await stream.write(new TextEncoder().encode(errPayload));
       } finally {
-        await chatSession.unlock(rayId)
-        await limiter.decrement()
-        await stream.close()
+        if (streamSuccess && totalTokens > 0) {
+          const cost = ai.estimateCost(totalTokens, finalModel);
+          await billing.recordUsage(user.id, totalTokens, cost).catch(console.error);
+          
+          if (c.env.CHAT_QUEUE) {
+            await c.env.CHAT_QUEUE.send({
+              userId: user.id,
+              tokens: totalTokens,
+              cost,
+              model: finalModel,
+              timestamp: new Date().toISOString()
+            }).catch(console.error);
+          }
+        }
+        releaseLimiter();
+        await stream.close();
       }
     })
+
 
   } catch (error: any) {
     console.error("Chat Setup Error:", error)
@@ -146,9 +160,9 @@ chat.post('/', sessionMiddleware, async (c) => {
  */
 chat.post('/:id/cancel', sessionMiddleware, async (c) => {
   const sessionId = c.req.param('id')
-  const sessionObjectId = c.env.CHAT_SESSION.idFromName(sessionId)
-  const chatSession = c.env.CHAT_SESSION.get(sessionObjectId)
-  const result = await chatSession.cancel()
+  const responserId = c.env.RESPONSER.idFromName(sessionId)
+  const responser = c.env.RESPONSER.get(responserId)
+  const result = await responser.cancel()
   return c.json(result)
 })
 
