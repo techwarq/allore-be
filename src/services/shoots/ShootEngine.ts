@@ -16,8 +16,9 @@ export interface ShootEnv {
   VERTEX_LOCATION: string
   VERTEX_SERVICE_ACCOUNT_EMAIL?: string
   VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY?: string
+  OPENAI_API_KEY: string
   DATABASE_URL: string
-  ASSETS_BUCKET: any   // R2Bucket — typed as any to avoid @cloudflare/workers-types version conflict
+  ASSETS_BUCKET: any
 }
 
 type StreamFn = (event: object) => Promise<void>
@@ -42,7 +43,7 @@ export class ShootEngine {
     this.forensics = new GarmentForensics(this.textService)
     this.planner = new ShootPlanner(this.textService)
     this.promptMaker = new PromptMaker(this.textService)
-    this.imageGenerator = new ImageGenerator(this.textService, env)
+    this.imageGenerator = new ImageGenerator(env)
   }
 
   async run(input: ShootEngineInput, stream: StreamFn): Promise<void> {

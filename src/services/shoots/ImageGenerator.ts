@@ -1,19 +1,16 @@
-import { TextService } from '../gemini/TextService'
 import { base64ToArrayBuffer } from '../../lib/r2'
 import { getDb } from '../../db'
 import { privateAssets } from '../../db/schema'
 import { ShootPrompt, ShootPackage, GeneratedShot } from '../../types/shoots'
 
 interface ImageGenEnv {
-  ASSETS_BUCKET: any   // R2Bucket — typed as any to avoid @cloudflare/workers-types version conflict
+  OPENAI_API_KEY: string
+  ASSETS_BUCKET: any
   DATABASE_URL: string
 }
 
 export class ImageGenerator {
-  constructor(
-    private textService: TextService,
-    private env: ImageGenEnv
-  ) {}
+  constructor(private env: ImageGenEnv) {}
 
   async generate(
     shootPrompt: ShootPrompt,
@@ -21,45 +18,39 @@ export class ImageGenerator {
     userId: string,
     projectId: string
   ): Promise<GeneratedShot> {
-    const spec = pkg.asset.productSpec
+    // Build multipart form — Workers native FormData + fetch, no SDK needed
+    const form = new FormData()
+    form.append('model', 'gpt-image-2')
+    form.append('prompt', shootPrompt.prompt)
+    form.append('size', '1024x1536')  // portrait, closest to 9:16
+    form.append('n', '1')
 
-    const parts: any[] = [
-      // Reference product image always goes first
-      {
-        inlineData: {
-          mimeType: pkg.asset.mimeType,
-          data: pkg.asset.base64
-        }
-      },
-      {
-        text: `PRODUCT REFERENCE IMAGE: The image above is the exact product to photograph. Reproduce it with zero modifications — same materials, color, finish, shape, and all visible details.
+    // Attach reference product image
+    const imageBytes = Uint8Array.from(atob(pkg.asset.base64), c => c.charCodeAt(0))
+    const imageBlob = new Blob([imageBytes], { type: pkg.asset.mimeType || 'image/jpeg' })
+    form.append('image[]', imageBlob, 'product.jpg')
 
-${shootPrompt.prompt}
-
-FIDELITY REMINDER: The reference product is a ${spec.productType} in ${spec.colorProfile.primary}, ${spec.finish} finish. Spatial anchor: ${spec.spatialAnchor}. Every detail listed above must appear in the output exactly as described.`
-      }
-    ]
-
-    const response = await this.textService.generate({
-      model: 'gemini-3.1-flash-image-preview',
-      contents: [{ role: 'user', parts }],
-      config: {
-        responseModalities: ['IMAGE'],
-        imageConfig: { aspectRatio: '9:16', imageSize: '2K' }
-      }
+    const res = await fetch('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}` },
+      body: form,
     })
 
-    const imagePart = response?.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)
-    if (!imagePart?.inlineData?.data) {
-      throw new Error(`ImageGenerator: no image returned for shoot ${shootPrompt.shootIndex}`)
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`OpenAI image edit failed (${res.status}): ${err}`)
     }
+
+    const json: any = await res.json()
+    const b64 = json?.data?.[0]?.b64_json
+    if (!b64) throw new Error(`ImageGenerator: no image in OpenAI response for shoot ${shootPrompt.shootIndex}`)
 
     // Store to R2
     const r2Key = `photoshoots/${userId}/${projectId}/${Date.now()}-shot${shootPrompt.shootIndex}.jpg`
     await this.env.ASSETS_BUCKET.put(
       r2Key,
-      base64ToArrayBuffer(imagePart.inlineData.data),
-      { httpMetadata: { contentType: imagePart.inlineData.mimeType || 'image/jpeg' } }
+      base64ToArrayBuffer(b64),
+      { httpMetadata: { contentType: 'image/png' } }
     )
 
     // Save asset record
