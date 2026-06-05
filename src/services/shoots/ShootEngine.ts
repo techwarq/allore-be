@@ -75,7 +75,7 @@ export class ShootEngine {
         index: p.shootIndex,
         theme: p.theme,
         angle: p.angle,
-        garment: p.asset.garmentSpec.garmentType,
+        garment: p.asset.productSpec.productType,
       }))
     })
 
