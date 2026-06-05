@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { sessionMiddleware } from '../middleware/auth'
 import { ShootEngine } from '../services/shoots/ShootEngine'
 
 type ShootsBindings = {
@@ -13,17 +12,16 @@ type ShootsBindings = {
   ASSETS_BUCKET: R2Bucket
 }
 
-const shoots = new Hono<{ Bindings: ShootsBindings, Variables: { user: any } }>()
+const shoots = new Hono<{ Bindings: ShootsBindings }>()
 
 /**
  * POST /shoots/generate
  * Streams a full photoshoot generation pipeline via SSE.
- * Body: { intent: string, assetIds: string[], projectId: string }
+ * Body: { intent: string, assetIds: string[], projectId?: string, userId?: string }
  */
-shoots.post('/generate', sessionMiddleware, async (c) => {
-  const user = c.get('user')
+shoots.post('/generate', async (c) => {
   const body = await c.req.json()
-  const { intent, assetIds, projectId } = body
+  const { intent, assetIds, projectId, userId } = body
 
   if (!intent || !Array.isArray(assetIds) || assetIds.length === 0) {
     return c.json({ error: 'Missing required fields: intent, assetIds' }, 400)
@@ -45,7 +43,7 @@ shoots.post('/generate', sessionMiddleware, async (c) => {
     }
 
     try {
-      await engine.run({ intent, assetIds, projectId: projectId || 'default', userId: user.id }, send)
+      await engine.run({ intent, assetIds, projectId: projectId || 'default', userId: userId || 'dev' }, send)
     } catch (err: any) {
       await send({ type: 'error', message: err.message || 'Shoot engine failed' })
     } finally {
