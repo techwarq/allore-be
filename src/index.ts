@@ -28,6 +28,7 @@ import suggestions from './routes/suggestions'
 import waitlist from './routes/waitlist'
 import creative from './routes/creative'
 import shoots from './routes/shoots'
+import dev from './routes/dev'
 import { sessionMiddleware, type AuthVariables } from './middleware/auth'
 import { GlobalLimiter } from './durable-objects/GlobalLimiter'
 import { ChatSession } from './durable-objects/ChatSession'
@@ -117,6 +118,7 @@ app.route('/suggestions', suggestions)
 app.route('/api', waitlist)
 app.route('/creative', creative)
 app.route('/shoots', shoots)
+app.route('/dev', dev)
 
 // R2 private asset proxy — auth-gated, no signed URLs needed
 app.get('/assets/private/:key{.+}', sessionMiddleware, async (c) => {

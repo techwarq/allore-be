@@ -166,24 +166,29 @@ assets.get('/flush-r2', async (c) => {
   }
 });
 
+// Protect all following routes
+assets.use('*', sessionMiddleware);
+
 /**
  * POST /assets/upload
  * Handles asset uploads (image/video/doc), extracts AI metadata, and embeds into Qdrant.
- * Auth-free: pass userId in form data or defaults to "dev".
  */
 assets.post('/upload', async (c) => {
+  const user = c.get('user');
   const formData = await c.req.parseBody();
-
+  
   const file = formData['file'];
-  const projectId = (formData['projectId'] as string) || 'default';
+  const projectId = formData['projectId'] as string;
   const chatId = formData['chatId'] as string | undefined;
   const type = formData['type'] as string || 'image';
   const subtype = formData['subtype'] as string || 'reference';
   const productId = formData['productId'] as string | undefined;
-  const userId = (formData['userId'] as string) || 'dev';
 
   if (!file || !(file instanceof File)) {
     return c.json({ error: 'Valid file is required' }, 400);
+  }
+  if (!projectId) {
+    return c.json({ error: 'projectId is required' }, 400);
   }
 
   try {
@@ -192,7 +197,7 @@ assets.post('/upload', async (c) => {
     const chatRepo = new ChatRepository(db);
 
     const asset = await uploadService.processUpload({
-      userId,
+      userId: user.id,
       projectId,
       chatId,
       file,
@@ -208,7 +213,7 @@ assets.post('/upload', async (c) => {
     if (chatId) {
       const { messageId } = await chatRepo.createMessage({
         projectId,
-        userId,
+        userId: user.id,
         chatId,
         sender: 'user',
         content: `Uploaded an image: ${downloadUrl}`,
@@ -241,9 +246,6 @@ assets.post('/upload', async (c) => {
     return c.json({ error: error.message || 'Failed to upload asset' }, 500);
   }
 });
-
-// Protect all following routes
-assets.use('*', sessionMiddleware);
 
 /**
  * POST /assets/reindex?projectId=
