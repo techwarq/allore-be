@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db'
-import { users, authAccounts, profiles, userCredits } from '../db/schema'
+import { users, authAccounts, profiles, userCredits, projects } from '../db/schema'
 import { eq } from 'drizzle-orm'
 import { AssetUploadService } from '../services/assetUpload.service'
 
@@ -21,15 +21,26 @@ type Bindings = {
 
 const dev = new Hono<{ Bindings: Bindings }>()
 
-async function getOrCreateDevUser(db: ReturnType<typeof getDb>): Promise<string> {
+async function getOrCreateDevContext(db: ReturnType<typeof getDb>): Promise<{ userId: string; projectId: string }> {
+  // Get or create dev user
+  let userId: string
   const [existing] = await db.select().from(users).where(eq(users.email, DEV_EMAIL)).limit(1)
-  if (existing) return existing.id
+  if (existing) {
+    userId = existing.id
+  } else {
+    const [newUser] = await db.insert(users).values({ email: DEV_EMAIL, emailVerified: true }).returning()
+    await db.insert(authAccounts).values({ userId: newUser.id, provider: 'local', passwordHash: 'dev' })
+    await db.insert(profiles).values({ userId: newUser.id, name: 'Dev User' })
+    await db.insert(userCredits).values({ userId: newUser.id, creditsRemaining: 9999 })
+    userId = newUser.id
+  }
 
-  const [newUser] = await db.insert(users).values({ email: DEV_EMAIL, emailVerified: true }).returning()
-  await db.insert(authAccounts).values({ userId: newUser.id, provider: 'local', passwordHash: 'dev' })
-  await db.insert(profiles).values({ userId: newUser.id, name: 'Dev User' })
-  await db.insert(userCredits).values({ userId: newUser.id, creditsRemaining: 9999 })
-  return newUser.id
+  // Get or create dev project for this user
+  const [existingProject] = await db.select().from(projects).where(eq(projects.userId, userId)).limit(1)
+  if (existingProject) return { userId, projectId: existingProject.id }
+
+  const [newProject] = await db.insert(projects).values({ userId, title: 'Dev Project', type: 'shoots', status: 'active' }).returning()
+  return { userId, projectId: newProject.id }
 }
 
 /**
@@ -47,11 +58,10 @@ dev.post('/upload', async (c) => {
 
   const type = (formData['type'] as string) || 'image'
   const subtype = (formData['subtype'] as string) || 'product_image'
-  const projectId = (formData['projectId'] as string) || 'default'
 
   try {
     const db = getDb(c.env.DATABASE_URL)
-    const userId = await getOrCreateDevUser(db)
+    const { userId, projectId } = await getOrCreateDevContext(db)
     const uploadService = new AssetUploadService(c.env, db)
 
     const asset = await uploadService.processUpload({ userId, projectId, file, type, subtype })
