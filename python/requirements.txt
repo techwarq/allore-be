@@ -1,0 +1,11 @@
+# Core
+pillow>=10.0.0
+numpy>=1.24.0
+
+# YOLOv8 person detection (downloads yolov8n.pt ~6MB on first run)
+ultralytics>=8.0.0
+
+# FastAPI server mode (optional — only needed for --server flag)
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9

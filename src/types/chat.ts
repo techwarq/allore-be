@@ -47,7 +47,8 @@ export type ChatEvent =
   | { type: "insta_post"; data: InstaPost }
   | { type: "videos"; items: Video[] }
   | { type: "done" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "queued"; jobId: string; sessionId: string };
 
 export type ToolResponse = {
   visible?: ChatEvent[];
@@ -129,6 +130,24 @@ export interface SessionMemory {
   productLock?: any;
   projectId?: string;
   userId?: string;
+
+  // Populated by MemoryRecallTool before other tools run.
+  // All subsequent tools read from here instead of hitting the DB themselves.
+  memoryContext?: {
+    brand: {
+      tone?: string | null;
+      aesthetic?: string | null;
+      coreStory?: string | null;
+      colorPalette?: any[];
+      targetAudience?: string | null;
+      visualMood?: string | null;
+      lightingStyle?: string | null;
+    } | null;
+    insights: { insight: string; category: string; confidence: number }[];
+    graph: string[];
+    episodic: { summary: string; feedbackScore: number; feedbackHint?: string }[];
+    retrievedAt: string;
+  };
 }
 
 

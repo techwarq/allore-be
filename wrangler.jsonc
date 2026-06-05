@@ -148,6 +148,9 @@
       ]
     }
   ],
+  "rules": [
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": false }
+  ],
   "observability": {
     "logs": {
       "enabled": true,

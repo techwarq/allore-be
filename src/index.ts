@@ -27,6 +27,7 @@ import assetsRouter from './routes/assets'
 import suggestions from './routes/suggestions'
 import waitlist from './routes/waitlist'
 import creative from './routes/creative'
+import shoots from './routes/shoots'
 import { sessionMiddleware, type AuthVariables } from './middleware/auth'
 import { GlobalLimiter } from './durable-objects/GlobalLimiter'
 import { ChatSession } from './durable-objects/ChatSession'
@@ -115,6 +116,18 @@ app.route('/assets', assetsRouter)
 app.route('/suggestions', suggestions)
 app.route('/api', waitlist)
 app.route('/creative', creative)
+app.route('/shoots', shoots)
+
+// R2 private asset proxy — auth-gated, no signed URLs needed
+app.get('/assets/private/:key{.+}', sessionMiddleware, async (c) => {
+  const key = decodeURIComponent(c.req.param('key'))
+  const obj = await c.env.ASSETS_BUCKET.get(key)
+  if (!obj) return c.json({ error: 'Asset not found' }, 404)
+  const headers = new Headers()
+  headers.set('Content-Type', obj.httpMetadata?.contentType || 'image/jpeg')
+  headers.set('Cache-Control', 'private, max-age=3600')
+  return new Response(obj.body, { headers })
+})
 
 // --- Protected Routes ---
 // --- Protected Routes ---
@@ -202,55 +215,48 @@ export default {
 
     for (const msg of batch.messages) {
       try {
-        const { sessionId, userId, tool, input, memory, brandContext, history } = msg.body;
-        
-        let result: any = { hidden: {}, visible: [] };
-        const toolCtx = { memory, brandContext, history, userId };
+        const { sessionId, userId, tool, input, jobId, memory, brandContext, history } = msg.body;
 
-        // 1. Rate Limiting based on tool/API
-        if (tool === 'storyteller' || tool === 'creative_studio') {
-          await rateLimit('llm', 50, 60000); // 50 requests per minute
-        } else if (tool === 'photoshoot_generator') {
-          await rateLimit('image_gen', 15, 60000); // 15 image gens per minute
+        let result: any = { hidden: {}, visible: [] };
+        // textService is required by ToolContext but PhotoshootGeneratorTool builds its own
+        const toolCtx = { memory, brandContext, history, userId, textService: null as any };
+
+        // 1. Rate Limiting
+        if (tool === 'photoshoot_generator') {
+          await rateLimit('image_gen', 15, 60000);
         }
 
         // 2. Execute Tool Logic
-        console.log(`[Queue] Executing tool: ${tool} for session: ${sessionId}`);
-        
+        console.log(`[Queue] Executing tool: ${tool} for session: ${sessionId}${jobId ? ` (job: ${jobId})` : ''}`);
+
         switch (tool) {
-          case "storyteller":
-            result = await new StorytellerTool(env).run(input, toolCtx);
-            break;
-            
           case "photoshoot_generator":
             const { PhotoshootGeneratorTool } = await import('./services/chat/tools/PhotoshootGeneratorTool');
             result = await new PhotoshootGeneratorTool(env).run(input, toolCtx);
             break;
-            
+
           case "video_generator":
-            // result = await new VideoGeneratorTool(env).run(input, toolCtx);
-            console.log(`[Queue] Video generation logic would run here...`);
+            console.log(`[Queue] Video generation not yet implemented`);
             result.visible.push({ type: "status", content: "Video generated successfully." });
             break;
-            
+
           default:
             console.warn(`[Queue] Unknown tool: ${tool}`);
             break;
         }
 
-        console.log(`[Queue] Tool ${tool} completed. Sending result to Responser...`);
+        console.log(`[Queue] Tool ${tool} completed — sending result to Responser`);
 
-        // 3. Send Result Back to DO Orchestrator
+        // 3. Send Result Back to DO
         try {
           const id = env.RESPONSER.idFromString(sessionId);
           const stub = env.RESPONSER.get(id);
-          
-          await (stub as any).handleToolResult(tool, result);
-          console.log(`[Queue] Successfully updated Responser for session ${sessionId}`);
-          msg.ack(); 
+
+          await (stub as any).handleToolResult(tool, result, jobId);
+          console.log(`[Queue] Responser updated for session ${sessionId}`);
+          msg.ack();
         } catch (doError) {
           console.error(`[Queue] Failed to communicate with DO for session ${sessionId}:`, doError);
-          // If the DO is unreachable or errors out, we retry the message
           msg.retry({ delaySeconds: 5 });
         }
 

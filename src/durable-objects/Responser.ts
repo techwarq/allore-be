@@ -58,18 +58,19 @@ export class Responser extends DurableObject<ResponserEnv> {
   private history: any[] = [];
   private brandContext: any = {};
   private userId = "";
+  private sessionKey = "";
   private attachments: any[] = [];
 
   // ── Execution state ────────────────────────────────────────────────────────
   private isLocked = false;
   private currentInput: any = {};
-  private activeAsyncJobs = 0;
   private abortController: AbortController | null = null;
 
   // ── Stream state ───────────────────────────────────────────────────────────
   private writer: WritableStreamDefaultWriter | null = null;
   private encoder = new TextEncoder();
   private heartbeatInterval: any = null;
+  private lockTimeout: any = null;
 
   // ── Shared services (built once, reused across tools) ─────────────────────
   private textService!: TextService;
@@ -89,7 +90,8 @@ export class Responser extends DurableObject<ResponserEnv> {
   async setContext(
     brandContext: any,
     userId: string = "",
-    projectId?: string
+    projectId?: string,
+    sessionKey?: string
   ): Promise<void> {
     const storedUserId = await this.ctx.storage.get<string>("userId");
 
@@ -97,6 +99,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       // Session already exists — refresh brand context and ensure memory is hydrated
       await this.ensureHydrated();
       this.brandContext = brandContext;
+      if (sessionKey) this.sessionKey = sessionKey;
 
       // Ensure projectId is always set in memory (defensive)
       if (projectId && !this.memory.projectId) {
@@ -110,6 +113,7 @@ export class Responser extends DurableObject<ResponserEnv> {
 
       await this.ctx.storage.put("brandContext", brandContext);
       await this.ctx.storage.put("memory", this.memory);
+      if (sessionKey) await this.ctx.storage.put("sessionKey", sessionKey);
       this.initialized = true;
       return;
     }
@@ -117,16 +121,15 @@ export class Responser extends DurableObject<ResponserEnv> {
     // First time — seed the session
     this.brandContext = brandContext;
     this.userId = userId;
+    this.sessionKey = sessionKey ?? "";
     if (projectId) this.memory.projectId = projectId;
 
-    // Load prior history from DB for this project
-    // This is the key change: we load ALL prior messages for this project
-    // so the DO has full context even on first boot
     await this.loadProjectHistory(projectId, userId);
 
     await this.ctx.storage.put({
       brandContext,
       userId,
+      sessionKey: sessionKey ?? "",
       memory: this.memory,
       history: this.history,
     });
@@ -188,8 +191,20 @@ export class Responser extends DurableObject<ResponserEnv> {
       this.sendEvent({ type: "status", content: " " }).catch(() => {
         clearInterval(this.heartbeatInterval);
         this.heartbeatInterval = null;
+        // Client disconnected — release the lock so the next request isn't blocked
+        this.cleanup().catch(console.error);
       });
     }, 15_000);
+
+    // Safety net for hung sync tools. Async tools release the lock proactively
+    // (via cleanup() in runNextStep) before this ever fires.
+    this.lockTimeout = setTimeout(async () => {
+      if (this.isLocked) {
+        console.error('[Responser] Lock timeout — forcing cleanup after 90s');
+        await this.sendEvent({ type: 'error', message: 'Request timed out' });
+        await this.cleanup();
+      }
+    }, 90_000);
 
     // All orchestration runs in waitUntil — non-blocking
     this.ctx.waitUntil(this.orchestrate(message, attachments));
@@ -201,40 +216,54 @@ export class Responser extends DurableObject<ResponserEnv> {
    * Called by queue workers when an async tool finishes.
    * This is the RPC callback — must re-hydrate if DO hibernated.
    */
-  async handleToolResult(tool: string, result: ToolResponse): Promise<void> {
+  async handleToolResult(tool: string, result: ToolResponse, jobId?: string): Promise<void> {
     // DO may have hibernated between enqueue and callback — re-hydrate
     await this.ensureHydrated();
 
-    if (this.abortController?.signal.aborted) return;
-
-    // 1. Merge memory update
     if (result.memoryUpdate) {
       this.memory = deepMerge(this.memory, result.memoryUpdate);
     }
 
-    // 2. Inject next tasks if tool requested them
+    // ── Async polling mode ─────────────────────────────────────────────────────
+    // The stream was closed before this queue job ran (writer is null).
+    // Accumulate events in DO storage; client polls pollJobResult().
+    if (!this.writer && jobId) {
+      const existing = await this.ctx.storage.get<ChatEvent[]>(`job:${jobId}:events`) ?? [];
+      await this.ctx.storage.put(`job:${jobId}:events`, [
+        ...existing,
+        ...(result.visible ?? []),
+      ]);
+
+      const remaining = ((await this.ctx.storage.get<number>(`job:${jobId}:pendingCount`)) ?? 1) - 1;
+      await this.ctx.storage.put(`job:${jobId}:pendingCount`, remaining);
+
+      if (remaining <= 0) {
+        await this.ctx.storage.put(`job:${jobId}:status`, "done");
+        console.log(`[Responser] Async job ${jobId} complete — ${existing.length + (result.visible?.length ?? 0)} events stored`);
+      }
+
+      await this.persist();
+      return;
+    }
+
+    // ── Sync streaming mode ────────────────────────────────────────────────────
     if (result.nextTasks?.length) {
       this.memory.flowControl.pendingTasks.unshift(...result.nextTasks);
     }
 
-    // 3. Stream visible events to client
     for (const event of result.visible ?? []) {
-      // Explicit history append — not a side effect of sendEvent
       if (event.type === "text") {
         this.history.push({ role: "assistant", content: (event as any).content });
       }
       await this.sendEvent(event);
     }
 
-    // 4. Update currentInput for the next tool
     if (result.nextInput) {
       this.currentInput = result.nextInput;
     }
 
-    // 5. Flush everything to storage
     await this.persist();
 
-    // 6. Pause check — tool asked to wait for user
     if (result.pauseForUserInput) {
       const q = result.visible?.find(
         (e: any) => e.type === "choice_questionnaire" || e.type === "questionnaire"
@@ -250,18 +279,23 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
-    // 7. Continue or finish
-    if (
-      this.memory.flowControl.pendingTasks.length > 0 ||
-      this.activeAsyncJobs > 0
-    ) {
+    if (this.memory.flowControl.pendingTasks.length > 0) {
       await this.runNextStep();
     } else {
-      // All done — save final assistant message to DB
       await this.flushAssistantHistory();
       await this.sendEvent({ type: "done" });
       await this.cleanup();
     }
+  }
+
+  /**
+   * Polling endpoint for async jobs (image gen, video gen).
+   * Returns stored events once the job is complete.
+   */
+  async pollJobResult(jobId: string): Promise<{ status: string; events: ChatEvent[] }> {
+    const status = (await this.ctx.storage.get<string>(`job:${jobId}:status`)) ?? "pending";
+    const events = (await this.ctx.storage.get<ChatEvent[]>(`job:${jobId}:events`)) ?? [];
+    return { status, events };
   }
 
   async cancel(): Promise<{ success: boolean; message: string }> {
@@ -355,17 +389,12 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
-    if (
-      this.memory.flowControl.pendingTasks.length === 0 &&
-      this.activeAsyncJobs === 0
-    ) {
+    if (this.memory.flowControl.pendingTasks.length === 0) {
       await this.flushAssistantHistory();
       await this.sendEvent({ type: "done" });
       await this.cleanup();
       return;
     }
-
-    if (this.memory.flowControl.pendingTasks.length === 0) return;
 
     const task = this.memory.flowControl.pendingTasks.shift()!;
     const ctx = this.buildToolContext();
@@ -373,6 +402,11 @@ export class Responser extends DurableObject<ResponserEnv> {
     // ── Sync fast-path tools ───────────────────────────────────────────────
     // These run directly inside the DO — no queue needed
     const syncTools: Record<string, () => Promise<ToolResponse>> = {
+      memory_recall: async () => {
+        const { MemoryRecallTool } = await import("../services/chat/tools/MemoryRecallTool");
+        return new MemoryRecallTool(this.env as any)
+          .run({ query: task.input?.query ?? this.currentInput?.message ?? "" }, ctx);
+      },
       creative_studio: async () => {
         await this.sendEvent({ type: "status", content: "Planning creative direction..." });
         return new CreativeStudioTool(this.textService, this.env as any)
@@ -408,10 +442,12 @@ export class Responser extends DurableObject<ResponserEnv> {
       const shots = this.memory.plannedShots ?? [];
 
       if (shots.length === 0) {
-        await this.sendEvent({
-          type: "status",
-          content: "No planned shots found. Skipping generation.",
-        });
+        // Planner was skipped or returned empty — insert it now and retry generator after.
+        this.memory.flowControl.pendingTasks.unshift(
+          { id: "replan", tool: "photoshoot_planner" as const, input: this.currentInput },
+          { id: "regen", tool: "photoshoot_generator" as const, input: {} }
+        );
+        await this.persist();
         await this.runNextStep();
         return;
       }
@@ -433,11 +469,38 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
-    // ── Default slow path ──────────────────────────────────────────────────
+    // ── Async slow path (image gen, video gen) ────────────────────────────────
+    // The DO will hibernate while these queue jobs run. The TransformStream
+    // writer is in-memory only and won't survive hibernation, so we:
+    //   1. Send a "queued" event so the client knows to switch to polling
+    //   2. Close the stream and release the lock immediately
+    //   3. Queue ALL remaining tasks at once (no serial waiting)
+    //   4. Results accumulate in DO storage; client polls /chat/jobs/:jobId
+    const jobId = crypto.randomUUID();
+    const remainingTasks = [...this.memory.flowControl.pendingTasks];
+    this.memory.flowControl.pendingTasks = [];
+    await this.persist();
+
+    const totalTaskCount = 1 + remainingTasks.length;
+    await this.ctx.storage.put(`job:${jobId}:status`, "pending");
+    await this.ctx.storage.put(`job:${jobId}:events`, [] as ChatEvent[]);
+    await this.ctx.storage.put(`job:${jobId}:pendingCount`, totalTaskCount);
+
+    await this.sendEvent({ type: "queued", jobId, sessionId: this.sessionKey });
+    await this.cleanup(); // releases lock, closes stream, clears timers
+
+    // Enqueue current task + all remaining in one go
     const taskInput = task.input && Object.keys(task.input).length > 0
       ? task.input
       : this.currentInput;
-    await this.enqueueTask(task, taskInput);
+    await this.enqueueTask(task, taskInput, jobId);
+
+    for (const remaining of remainingTasks) {
+      const rInput = remaining.input && Object.keys(remaining.input).length > 0
+        ? remaining.input
+        : this.currentInput;
+      await this.enqueueTask(remaining, rInput, jobId);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -451,11 +514,12 @@ export class Responser extends DurableObject<ResponserEnv> {
   private async ensureHydrated(): Promise<void> {
     if (this.initialized) return;
 
-    const [memory, history, brandContext, userId] = await Promise.all([
+    const [memory, history, brandContext, userId, sessionKey] = await Promise.all([
       this.ctx.storage.get<SessionMemory>("memory"),
       this.ctx.storage.get<any[]>("history"),
       this.ctx.storage.get<any>("brandContext"),
       this.ctx.storage.get<string>("userId"),
+      this.ctx.storage.get<string>("sessionKey"),
     ]);
 
     this.memory = memory ?? {
@@ -465,6 +529,7 @@ export class Responser extends DurableObject<ResponserEnv> {
     this.history = history ?? [];
     this.brandContext = brandContext ?? {};
     this.userId = userId ?? "";
+    this.sessionKey = sessionKey ?? "";
     this.initialized = true;
   }
 
@@ -577,6 +642,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       history: this.history,
       attachments: this.attachments,
       userId: this.userId,
+      sessionId: this.sessionKey,
       // Shared service — not reconstructed per tool
       textService: this.textService,
     };
@@ -764,12 +830,13 @@ export class Responser extends DurableObject<ResponserEnv> {
   // QUEUE
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private async enqueueTask(task: Task, input: any): Promise<void> {
+  private async enqueueTask(task: Task, input: any, jobId?: string): Promise<void> {
     const job = {
       sessionId: this.ctx.id.toString(),
       userId: this.userId,
       tool: task.tool,
       input,
+      jobId, // tells handleToolResult to store results instead of streaming
       brandContext: this.brandContext,
       memory: this.memory,
       history: this.history,
@@ -777,11 +844,8 @@ export class Responser extends DurableObject<ResponserEnv> {
     };
 
     const queueMap: Record<string, Queue> = {
-      storyteller:        this.env.LLM_QUEUE,
-      creative_studio:    this.env.LLM_QUEUE,
-      photoshoot_planner: this.env.LLM_QUEUE,
       photoshoot_generator: this.env.IMAGE_QUEUE,
-      video_generator:    this.env.VIDEO_QUEUE,
+      video_generator:      this.env.VIDEO_QUEUE,
     };
 
     const queue = queueMap[task.tool] ?? this.env.LLM_QUEUE;
@@ -806,6 +870,11 @@ export class Responser extends DurableObject<ResponserEnv> {
   private async cleanup(): Promise<void> {
     this.isLocked = false;
     this.abortController = null;
+
+    if (this.lockTimeout) {
+      clearTimeout(this.lockTimeout);
+      this.lockTimeout = null;
+    }
 
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);

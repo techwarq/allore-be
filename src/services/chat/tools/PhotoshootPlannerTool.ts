@@ -193,6 +193,10 @@ Return STRICT JSON:
 
 
 
+    if (plannedShots.length === 0) {
+      throw new Error("Photoshoot Planner returned 0 shots — the LLM response was empty or unparseable.");
+    }
+
     return {
       visible: [
         {
@@ -206,7 +210,7 @@ Return STRICT JSON:
           productLocked: true,
           productConstraints: productLock
         },
-        plannedShots // NEW: Save to memory so Responser can see it for fan-out
+        plannedShots
       },
       hidden: {
         productLock,

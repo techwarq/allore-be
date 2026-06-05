@@ -5,8 +5,10 @@ import { CreativeStudioTool } from "./tools/CreativeStudioTool";
 import { PhotoshootPlannerTool } from "./tools/PhotoshootPlannerTool";
 import { PhotoshootGeneratorTool } from "./tools/PhotoshootGeneratorTool";
 import { AvatarGeneratorTool } from "./tools/AvatarGeneratorTool";
+import { MemoryRecallTool } from "./tools/MemoryRecallTool";
 import { Tool, ToolContext } from "./tools/Tool";
 import { ToolResponse } from "../../types/chat";
+import { TextService } from "../gemini/TextService";
 
 /**
  * A stub tool for capabilities handled by async queues rather than direct execution.
@@ -20,6 +22,7 @@ class QueueTool implements Tool {
 
 export function getStandardToolCatalog(env: any, textService?: TextService): ToolCatalog {
   const registry = new ToolRegistry()
+    .register(new MemoryRecallTool(env))
     .register(new StorytellerTool(textService || env, textService ? env : undefined))
     .register(new CreativeStudioTool(textService || env, textService ? env : undefined))
     .register(new PhotoshootPlannerTool(textService || env, textService ? env : undefined))

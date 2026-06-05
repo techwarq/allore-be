@@ -7,6 +7,7 @@ export interface ToolContext {
   history: any[];
   attachments?: any[];
   userId?: string;
+  sessionId?: string;
   textService: TextService;
 }
 

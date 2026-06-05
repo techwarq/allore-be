@@ -83,12 +83,12 @@ chat.post('/', sessionMiddleware, async (c) => {
       extraDetails: profile.extraDetails,
       goals: profile.goals,
       targetAudience: profile.targetAudience,
-      userType: profile.userType,
+      userType: profile.userType, 
       preferences: (profile.preferences as any)?.company || {}
     } : {};
 
     // setContext is now idempotent and handles history loading internally
-    await responser.setContext(brandContext, user.id, projectId);
+    await responser.setContext(brandContext, user.id, projectId, sid);
 
     const releaseLimiter = () => limiter.decrement().catch(console.error);
 
@@ -165,5 +165,24 @@ chat.post('/:id/cancel', sessionMiddleware, async (c) => {
   const result = await responser.cancel()
   return c.json(result)
 })
+
+/**
+ * Poll for async job results.
+ */
+chat.get('/jobs/:sessionId/:jobId', sessionMiddleware, async (c) => {
+  const sessionId = c.req.param('sessionId');
+  const jobId = c.req.param('jobId');
+
+  try {
+    const responserId = c.env.RESPONSER.idFromName(sessionId);
+    const responser = c.env.RESPONSER.get(responserId);
+    
+    const result = await (responser as any).pollJobResult(jobId);
+    return c.json(result);
+  } catch (error: any) {
+    console.error("Poll Job Error:", error);
+    return c.json({ error: 'Failed to poll job status.' }, 500);
+  }
+});
 
 export default chat

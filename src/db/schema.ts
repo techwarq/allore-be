@@ -327,3 +327,88 @@ export const chatMessages = pgTable('chat_messages', {
   type: text('type').default('text').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 MEMORY SYSTEM V3
+//
+// 3 layers:
+//   STM       → mem_sessions   (per chat session + queryable by project)
+//   Episodic  → mem_episodes   (every interaction, feedback-scored, Qdrant-indexed)
+//   LTM       → mem_insights   (distilled patterns) + graph (mem_nodes + mem_edges)
+//
+// All layers feed the same graph — it is the connective tissue between them.
+// Negative-feedback episodes are kept as avoidance signals, not deleted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const memSessions = pgTable('mem_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sessionId: text('session_id').notNull().unique(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+  data: jsonb('data').default({}).notNull(),
+  status: text('status').default('active').notNull(), // 'active' | 'done'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const memEpisodes = pgTable('mem_episodes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+  chatId: uuid('chat_id').references(() => chats.id, { onDelete: 'set null' }),
+  content: jsonb('content').notNull(),       // { events, entities, relations, outcome }
+  summary: text('summary').notNull(),
+  feedbackScore: integer('feedback_score').default(0).notNull(), // -1 | 0 | 1
+  feedbackText: text('feedback_text'),
+  importance: decimal('importance', { precision: 5, scale: 4 }).default('0.5000').notNull(),
+  wasConsolidated: boolean('was_consolidated').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Graph nodes — shared across projects for same user (scope='global') or project-scoped (scope='project')
+// Unique on (userId, name, type, scope): same entity name+type for same user = same node.
+export const memNodes = pgTable('mem_nodes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = global
+  name: text('name').notNull(),
+  type: text('type').notNull(),                           // 'brand' | 'style' | 'topic' | 'product' | 'audience' | 'user'
+  scope: text('scope').default('project').notNull(),      // 'global' | 'project'
+  layer: text('layer').default('episodic').notNull(),     // 'stm' | 'episodic' | 'ltm'
+  confidence: decimal('confidence', { precision: 5, scale: 4 }).default('0.5000').notNull(),
+  metadata: jsonb('metadata').default({}).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  unq: uniqueIndex('mem_nodes_user_name_type_scope_key').on(t.userId, t.name, t.type, t.scope),
+}));
+
+export const memEdges = pgTable('mem_edges', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = global
+  fromNodeId: uuid('from_node_id').references(() => memNodes.id, { onDelete: 'cascade' }).notNull(),
+  toNodeId: uuid('to_node_id').references(() => memNodes.id, { onDelete: 'cascade' }).notNull(),
+  relationType: text('relation_type').notNull(), // 'prefers' | 'avoids' | 'leads_to' | 'targets' | 'negates'
+  weight: decimal('weight', { precision: 5, scale: 4 }).default('0.5000').notNull(),
+  sourceLayer: text('source_layer').default('episodic').notNull(), // 'stm' | 'episodic' | 'ltm'
+  lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  unq: uniqueIndex('mem_edges_user_from_to_type_key').on(t.userId, t.fromNodeId, t.toNodeId, t.relationType),
+}));
+
+export const memInsights = pgTable('mem_insights', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = global
+  insight: text('insight').notNull(),
+  category: text('category').notNull(), // 'preference' | 'avoidance_pattern' | 'reinforcement_pattern' | 'brand_knowledge' | 'style_pattern'
+  confidence: decimal('confidence', { precision: 5, scale: 4 }).default('0.5000').notNull(),
+  hitCount: integer('hit_count').default(1).notNull(),
+  sourceEpisodeIds: jsonb('source_episode_ids').default([]).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});

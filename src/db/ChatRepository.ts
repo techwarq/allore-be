@@ -1,5 +1,5 @@
 import { eq, and, desc } from 'drizzle-orm';
-import { messages, chats, assets, messageAssets } from './schema';
+import { messages, chats, assets, messageAssets, profiles } from './schema';
 
 export class ChatRepository {
   private db: any;

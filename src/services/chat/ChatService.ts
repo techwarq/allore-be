@@ -1,10 +1,8 @@
 import { ChatRepository } from "../../db/ChatRepository";
+import { Responser } from "../../durable-objects/Responser";
 import { SubscriptionService, AccessResult } from "../subscription.service";
 
-export interface Responser {
-    process(message: string, attachments?: any[]): Promise<ReadableStream>;
-    setContext(brandContext: any, userId: string, projectId: string): Promise<void>;
-}
+
 
 export interface RateLimit {
     check(userId: string): Promise<boolean>;
@@ -59,18 +57,11 @@ export default class ChatService {
         } : {};
 
         // 4. Set Context on Responser
-        await this.responser.setContext(brandContext, userId, projectId);
+        // We use the same sessionId derivation strategy
+        const sid = `${projectId}-${userId}`;
+        await this.responser.setContext(brandContext, userId, projectId, sid);
 
-        // 5. Save User Message
-        const saved = await this.repo.createMessage({
-            userId,
-            projectId,
-            content: message,
-            sender: 'user',
-            type: 'text',
-        });
-
-        yield { type: 'session_info', chatId: saved.chatId };
+        yield { type: 'session_info', chatId: sid };
 
         // 6. Start Streaming from Responser
         const readable = await this.responser.process(message, attachments || []);
@@ -84,22 +75,29 @@ export default class ChatService {
                 if (done) break;
 
                 const chunk = decoder.decode(value, { stream: true });
-                fullResponse += chunk;
+                
+                // Parse SSE to extract text content
+                const lines = chunk.split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.substring(6));
+                            if (data.type === 'text' && data.content) {
+                                fullResponse += data.content;
+                            }
+                        } catch (e) {
+                            // Ignore parsing errors for incomplete chunks
+                        }
+                    }
+                }
                 
                 if (chunk) {
                     yield { type: 'chunk', text: chunk };
                 }
             }
 
-            // 7. Save Assistant Response after stream completion
-            await this.repo.createMessage({
-                userId,
-                projectId,
-                chatId: saved.chatId!,
-                content: fullResponse,
-                sender: 'assistant',
-                type: 'text',
-            });
+            // Assistant messages are already persisted by the Responser,
+            // so we skip duplicate saving here.
 
             // 8. Deduct Credits (Calculating tokens from fullResponse)
             const tokenCount = Math.ceil(fullResponse.length / 4); // Simple estimation
@@ -107,7 +105,7 @@ export default class ChatService {
                 userId,
                 tokenCount,
                 'chat_usage',
-                saved.chatId!
+                sid
             );
 
             yield { 
