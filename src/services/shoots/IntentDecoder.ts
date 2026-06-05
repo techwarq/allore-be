@@ -6,7 +6,7 @@ export class IntentDecoder {
 
   async decode(intent: string, assetIds: string[]): Promise<IntentPlan> {
     const response = await this.textService.generate({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3-flash-preview',
       systemInstruction: 'You are a fashion creative director. Parse photoshoot requests into structured plans. Be decisive — if count is unspecified, choose what makes creative sense for the number of assets.',
       contents: [{
         role: 'user',

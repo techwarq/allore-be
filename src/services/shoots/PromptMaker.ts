@@ -42,7 +42,7 @@ Using the Nano Banana Creative Director framework, write the complete production
 Output the prompt block only — no preamble, no explanation.`
 
     const response = await this.textService.generate({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3-flash-preview',
       systemInstruction: nanobananaSkill,
       contents: [{
         role: 'user',

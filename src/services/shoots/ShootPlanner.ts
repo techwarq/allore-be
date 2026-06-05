@@ -16,7 +16,7 @@ export class ShootPlanner {
     }))
 
     const response = await this.textService.generate({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3-flash-preview',
       systemInstruction: 'You are a senior commercial photography creative director. You plan product shoots for any type of product — apparel, electronics, beauty, food, furniture, anything. Create shoot plans that showcase the product accurately and attractively.',
       contents: [{
         role: 'user',

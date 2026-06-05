@@ -6,7 +6,7 @@ export class GarmentForensics {
 
   async analyze(base64Image: string, mimeType: string): Promise<ProductSpec> {
     const response = await this.textService.generate({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3-flash-preview',
       systemInstruction: `You are a product forensics specialist for commercial photography.
 You analyze any product — apparel, electronics, beauty, tableware, footwear, furniture, food, anything —
 with extreme technical precision, as if writing a production spec sheet for a photo studio.
