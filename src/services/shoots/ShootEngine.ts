@@ -47,7 +47,8 @@ export class ShootEngine {
   }
 
   async run(input: ShootEngineInput, stream: StreamFn): Promise<void> {
-    const { intent, assetIds, projectId, userId } = input
+    const { intent, assetIds, projectId, userId, modelR2Keys } = input
+    const hasModels = !!(modelR2Keys && modelR2Keys.length > 0)
 
     // ── Stage 1: Decode intent ─────────────────────────────────────────────
     await stream({ type: 'status', content: 'Decoding your intent...' })
@@ -57,7 +58,7 @@ export class ShootEngine {
       content: `Planning ${intentPlan.countHint} shoots — ${intentPlan.overallStyle} style, ${intentPlan.mood}`
     })
 
-    // ── Stage 2a: Pull assets + forensics (sequential per asset) ──────────
+    // ── Stage 2a: Pull product assets + forensics ─────────────────────────
     await stream({ type: 'status', content: 'Analyzing your garments...' })
     const assetsWithSpecs = await this.loadAndAnalyzeAssets(assetIds, stream)
 
@@ -66,9 +67,22 @@ export class ShootEngine {
       return
     }
 
-    // ── Stage 2b: Plan shoots ──────────────────────────────────────────────
+    // ── Stage 2b: Load model reference image (front angle preferred) ──────
+    let modelBytes: { data: string; mimeType: string } | null = null
+    if (hasModels) {
+      await stream({ type: 'status', content: 'Loading model reference...' })
+      // Prefer the "front" angle key; fall back to first available
+      const frontKey = modelR2Keys!.find(k => k.includes('-front.')) ?? modelR2Keys![0]
+      try {
+        modelBytes = await fetchR2AsBase64(this.env.ASSETS_BUCKET, frontKey)
+      } catch (err: any) {
+        console.warn('[ShootEngine] Could not load model reference image:', err.message)
+      }
+    }
+
+    // ── Stage 2c: Plan shoots ──────────────────────────────────────────────
     await stream({ type: 'status', content: 'Building shoot plan...' })
-    const shootPackages = await this.planner.plan(intentPlan, assetsWithSpecs)
+    const shootPackages = await this.planner.plan(intentPlan, assetsWithSpecs, hasModels)
     await stream({
       type: 'plan',
       summary: `${shootPackages.length} shoots planned`,
@@ -83,15 +97,18 @@ export class ShootEngine {
     // ── Stages 3 + 4: Sequential — stream each image as it's ready ────────
     for (const pkg of shootPackages) {
       try {
-        // Stage 3: Build Nano Banana prompt
+        // Stage 3: Build prompt
         await stream({ type: 'status', content: `Writing prompt for shoot ${pkg.shootIndex + 1}: ${pkg.theme}...` })
         const shootPrompt = await this.promptMaker.make(pkg)
 
-        // Stage 4: Generate image
+        // Stage 4: Generate image — pass model reference only for on_model / lifestyle shots
+        const useModel = modelBytes && (pkg.modelType === 'on_model' || pkg.modelType === 'lifestyle')
         await stream({ type: 'status', content: `Generating shoot ${pkg.shootIndex + 1}/${shootPackages.length}: ${pkg.theme}...` })
-        const shot = await this.imageGenerator.generate(shootPrompt, pkg, userId, projectId)
+        const shot = await this.imageGenerator.generate(
+          shootPrompt, pkg, userId, projectId,
+          useModel ? modelBytes : null
+        )
 
-        // Stream immediately — don't wait for the rest
         await stream({
           type: 'photoshoots',
           items: [{
@@ -105,7 +122,6 @@ export class ShootEngine {
         })
 
       } catch (err: any) {
-        // One failed shot doesn't kill the whole run
         console.error(`[ShootEngine] Shoot ${pkg.shootIndex + 1} failed:`, err.message)
         await stream({
           type: 'status',

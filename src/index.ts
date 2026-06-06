@@ -113,14 +113,8 @@ app.route('/billing', billing)
 app.route('/storytelling', storytelling)
 app.route('/profile', profile)
 app.route('/projects', project)
-app.route('/assets', assetsRouter)
-app.route('/suggestions', suggestions)
-app.route('/api', waitlist)
-app.route('/creative', creative)
-app.route('/shoots', shoots)
-app.route('/dev', dev)
-
-// R2 private asset proxy — auth-gated, no signed URLs needed
+// R2 private asset proxy — must be registered before the assets sub-router
+// to prevent the router's wildcard auth middleware from intercepting it first
 app.get('/assets/private/:key{.+}', sessionMiddleware, async (c) => {
   const key = decodeURIComponent(c.req.param('key'))
   const obj = await c.env.ASSETS_BUCKET.get(key)
@@ -130,6 +124,13 @@ app.get('/assets/private/:key{.+}', sessionMiddleware, async (c) => {
   headers.set('Cache-Control', 'private, max-age=3600')
   return new Response(obj.body, { headers })
 })
+
+app.route('/assets', assetsRouter)
+app.route('/suggestions', suggestions)
+app.route('/api', waitlist)
+app.route('/creative', creative)
+app.route('/shoots', shoots)
+app.route('/dev', dev)
 
 // --- Protected Routes ---
 // --- Protected Routes ---
@@ -216,26 +217,47 @@ export default {
     console.log(`[Queue] Processing batch of ${batch.messages.length} messages from ${batch.queue}`);
 
     for (const msg of batch.messages) {
+      const { sessionId, userId, tool, input, jobId, memory, brandContext, history } = msg.body;
+
+      const getDoStub = () => {
+        const id = env.RESPONSER.idFromString(sessionId);
+        return env.RESPONSER.get(id) as any;
+      };
+
       try {
-        const { sessionId, userId, tool, input, jobId, memory, brandContext, history } = msg.body;
+        await rateLimit('image_gen', 15, 60000);
 
         let result: any = { hidden: {}, visible: [] };
-        // textService is required by ToolContext but PhotoshootGeneratorTool builds its own
-        const toolCtx = { memory, brandContext, history, userId, textService: null as any };
-
-        // 1. Rate Limiting
-        if (tool === 'photoshoot_generator') {
-          await rateLimit('image_gen', 15, 60000);
-        }
-
-        // 2. Execute Tool Logic
         console.log(`[Queue] Executing tool: ${tool} for session: ${sessionId}${jobId ? ` (job: ${jobId})` : ''}`);
 
         switch (tool) {
-          case "photoshoot_generator":
-            const { PhotoshootGeneratorTool } = await import('./services/chat/tools/PhotoshootGeneratorTool');
-            result = await new PhotoshootGeneratorTool(env).run(input, toolCtx);
+          case "shoot_engine": {
+            const { ShootEngine } = await import('./services/shoots/ShootEngine');
+            const engine = new ShootEngine({
+              GEMINI_API_KEY: env.GEMINI_API_KEY,
+              VERTEX_PROJECT_ID: env.VERTEX_PROJECT_ID,
+              VERTEX_LOCATION: env.VERTEX_LOCATION,
+              VERTEX_SERVICE_ACCOUNT_EMAIL: env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+              VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY,
+              OPENAI_API_KEY: env.OPENAI_API_KEY,
+              DATABASE_URL: env.DATABASE_URL,
+              ASSETS_BUCKET: env.ASSETS_BUCKET,
+            });
+
+            // Stream each event back to the DO as it arrives so the client sees
+            // shots and status updates immediately when polling — don't batch at end.
+            const stub = getDoStub();
+            await engine.run(
+              { intent: input.intent, assetIds: input.assetIds, projectId: input.projectId, userId: input.userId },
+              async (event: any) => {
+                if (event.type !== 'done' && jobId) {
+                  await stub.appendJobEvents(jobId, [event]);
+                }
+              }
+            );
+            // result.visible stays empty — events were already appended incrementally
             break;
+          }
 
           case "video_generator":
             console.log(`[Queue] Video generation not yet implemented`);
@@ -247,26 +269,33 @@ export default {
             break;
         }
 
-        console.log(`[Queue] Tool ${tool} completed — sending result to Responser`);
+        console.log(`[Queue] Tool ${tool} completed — finalising job`);
 
-        // 3. Send Result Back to DO
+        // Mark job done + ack
         try {
-          const id = env.RESPONSER.idFromString(sessionId);
-          const stub = env.RESPONSER.get(id);
-
-          await (stub as any).handleToolResult(tool, result, jobId);
-          console.log(`[Queue] Responser updated for session ${sessionId}`);
+          await getDoStub().handleToolResult(tool, result, jobId);
           msg.ack();
         } catch (doError) {
-          console.error(`[Queue] Failed to communicate with DO for session ${sessionId}:`, doError);
+          console.error(`[Queue] Failed to finalise job for session ${sessionId}:`, doError);
           msg.retry({ delaySeconds: 5 });
         }
 
       } catch (err: any) {
-        console.error("[Queue] Task execution error:", err.message);
-        
-        // If we hit a rate limit or a temporary API failure, back off and retry
-        msg.retry({ delaySeconds: 10 });
+        console.error(`[Queue] Tool ${tool} failed:`, err.message);
+
+        // Always report the error back to the DO so the job is never stuck in "pending".
+        if (sessionId && jobId) {
+          try {
+            await getDoStub().handleToolResult(tool, {
+              visible: [{ type: 'error', message: `Generation failed: ${err.message}` }]
+            }, jobId);
+            msg.ack();
+          } catch {
+            msg.retry({ delaySeconds: 10 });
+          }
+        } else {
+          msg.retry({ delaySeconds: 10 });
+        }
       }
     }
   }

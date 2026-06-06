@@ -7,49 +7,49 @@ export class GarmentForensics {
   async analyze(base64Image: string, mimeType: string): Promise<ProductSpec> {
     const response = await this.textService.generate({
       model: 'gemini-3-flash-preview',
-      systemInstruction: `You are a product forensics specialist for commercial photography.
-You analyze any product — apparel, electronics, beauty, tableware, footwear, furniture, food, anything —
-with extreme technical precision, as if writing a production spec sheet for a photo studio.
-Never use vague language. Be exact with materials, dimensions, and construction details.`,
+      systemInstruction: `You are a Senior Computer Vision Product Design Analyst and Industrial Fabric Forensic Expert.
+
+Analyze any raw product asset with absolute technical precision. Strip away the background clutter. Your job is to extract the literal structural architecture, geometric primitives, and micro-texture markers of the product. This data will be used to freeze the product's identity so it never distorts, warps, or stretches under any canvas manipulation.`,
       contents: [{
         role: 'user',
         parts: [
           { inlineData: { mimeType, data: base64Image } },
           {
-            text: `Analyze this product image with technical precision for commercial AI photography.
-
-First identify what the product is and its category. Then extract all visual and physical details that matter for reproducing it accurately in an image.
+            text: `Analyze this D2C product image using the Hyper-Realistic Product DNA schema.
 
 Return a JSON object with this exact structure (raw JSON, no markdown):
 {
-  "productType": "specific product name, e.g. 'ceramic pour-over coffee mug', 'wireless over-ear headphones', 'midi A-line dress', 'leather Chelsea boot'",
+  "productType": "uncompromisingly specific name, e.g., '8 oz matte aluminum beverage can', 'heavyweight 450gsm loopback cotton hoodie'",
   "category": "one of: apparel, footwear, beauty, skincare, electronics, tableware, furniture, food, jewellery, accessories, bags, homeware, other",
 
-  "materials": ["array of materials/fabrics/finishes, e.g. '100% cotton voile' or 'matte ceramic body' or 'polycarbonate shell'"],
-  "finish": "surface finish descriptor, e.g. 'matte', 'glossy', 'brushed metal', 'textured knit', 'smooth leather'",
+  "formGeometry": "CRITICAL: Define the mathematical shapes, primitives, and curves to lock down perspective. E.g., 'Perfect cylinder with unbending right-angle top lip and flat tapered base block. Must lock horizontal-to-vertical ratio to prevent oval distortion under 16:9 framing.'",
+
+  "materials": ["exact structural materials, e.g., 'brushed raw silver aluminum', '100% organic open-end slub cotton texturized knit'"],
+  "finish": "precise micro-surface texture descriptor, e.g., 'powder-coated matte with fine tactile grain', 'high-gloss reflective glazing'",
 
   "colorProfile": {
-    "primary": "exact primary color name",
-    "secondary": "secondary color if clearly present, omit if solid",
+    "primary": "exact tone and light interaction, e.g., 'matte desaturated sky-blue', 'flat high-absorption obsidian black'",
+    "secondary": "secondary color accents if present, otherwise omit",
     "pattern": "one of: solid, gradient, striped, printed, textured, multicolor, clear"
   },
 
-  "dimensions": "approximate size/proportions, e.g. '~12cm height x 9cm diameter' or '~44 inches from shoulder to hem' or 'full-size over-ear cups'",
+  "dimensions": "structural height-to-width spatial ratio to act as a strict aspect guard against wide-canvas stretching.",
 
-  "spatialAnchor": "CRITICAL — the key spatial reference that defines the product's orientation and prevents proportion distortion. Examples: apparel → 'hem terminates exactly 3 inches above the ankle bone'; mug → 'sits upright on flat base, handle projects to the right, open rim at top'; headphones → 'ear cups hang at bottom, headband arches above, cushions face forward'; shoe → 'heel elevated, toe box pointing left, sole flat on surface'",
+  "spatialAnchor": "NON-NEGOTIABLE CORE ANCHOR: The absolute physical grounding property. E.g., 'Sits perfectly flat on a level plane; vertical center axis must remain perfectly 90-degrees straight, cap/lip defines the top horizontal boundary.'",
 
-  "keyDetails": ["ALL visible product details verbatim — every seam, logo, button, port, label, texture, stitching, hardware, etc."],
-  "premiumDetails": ["standout quality or craft details, e.g. 'hand-stitched welt', 'gold-plated rim', 'custom woven label', 'engraved serial number'"],
+  "keyDetails": ["array of every single micro-element: sharp sans-serif black print typography, specific text strings, tiny warning symbols, ridges, stitches, pull-tabs, seams, etc."],
+  "premiumDetails": ["quality indicators that give the asset high-end reality: brushed metal grain, embossed textures, raw fiber fraying, contrast lock-stitching. Empty array [] if none."],
 
-  "contrastBoundary": "what to place around or beneath the product to clearly define its edges in a photo. e.g. 'place on dark wood surface to define light ceramic base' or 'shoot over bare skin to define hem line' or 'dark background to define white product silhouette'",
+  "contrastBoundary": "optical separation rule, e.g., 'must be placed on a raw texturized dark stone or organic surface to crisply isolate and bounce light off the light-colored base silhouettes.'",
 
-  "brandMarkings": "any visible brand names, logos, or text on the product — exact position and appearance. Omit if none.",
-  "functionalElements": "key functional parts that must be visible/accurate, e.g. 'USB-C port on bottom edge', 'flip-top lid with hinge', 'lace-up closure with 7 eyelets'. Omit if not applicable."
+  "brandMarkings": "exact case-sensitive brand text strings, locations, font weight behavior on the package. Omit if none.",
+  "functionalElements": "mechanical or usable parts: pull-tab on top center, pump nozzle, zipper tracks. Omit if none."
 }
 
 Rules:
-- spatialAnchor is the most critical field — be precise about how the product sits in space
-- keyDetails must be an array, list every visible detail however small
+- You must be fiercely objective. Ban words like 'sleek', 'beautiful', 'premium', 'clean'. Replace them with industrial descriptors like 'matte powder-coated', 'tactile', 'unvarnished', 'brushed'.
+- formGeometry and spatialAnchor are the most critical fields — be precise
+- keyDetails must list every visible detail however small
 - premiumDetails must be an array, empty array [] if none
 - Return raw JSON only, no markdown code blocks`
           }

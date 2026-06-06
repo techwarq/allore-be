@@ -24,6 +24,9 @@ export type ProductSpec = {
     pattern: string          // "solid", "gradient", "printed", "striped", "textured"
   }
 
+  // Shape & geometry
+  formGeometry: string       // literal physical shape, lines, contours, silhouette — e.g. "cylindrical with hard right-angle shoulders"
+
   // Dimensions & spatial grounding
   dimensions: string         // "approx 12cm height x 9cm diameter" or "midi length ~44in from shoulder"
   spatialAnchor: string      // key spatial reference to prevent proportion hallucination
@@ -82,4 +85,5 @@ export type ShootEngineInput = {
   assetIds: string[]
   projectId: string
   userId: string
+  modelR2Keys?: string[]  // avatar R2 keys to use as model references in on_model shots
 }

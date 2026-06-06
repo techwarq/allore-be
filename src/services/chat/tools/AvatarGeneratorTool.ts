@@ -204,8 +204,8 @@ Add a 4th option: { "id": "custom", "label": "I'll describe them", "description"
           }
         }
       ],
-      // Dynamically chain to planner — only after avatars are confirmed
-      nextTasks: [{ id: "photoshoot_planner", tool: "photoshoot_planner", input: {} }]
+      // Chain to shoot_engine_planner — avatars are now in memory, it will proceed to generation
+      nextTasks: [{ id: "shoot_engine_planner", tool: "shoot_engine_planner" as any, input: {} }]
     };
   }
 

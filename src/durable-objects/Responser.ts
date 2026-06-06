@@ -9,7 +9,6 @@ import { TextService } from "../services/gemini/TextService";
 import { getStandardToolCatalog } from "../services/chat/StandardTools";
 import { CreativeStudioTool } from "../services/chat/tools/CreativeStudioTool";
 import { StorytellerTool } from "../services/chat/tools/StorytellerTool";
-import { PhotoshootPlannerTool } from "../services/chat/tools/PhotoshootPlannerTool";
 import { AvatarGeneratorTool } from "../services/chat/tools/AvatarGeneratorTool";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -289,6 +288,15 @@ export class Responser extends DurableObject<ResponserEnv> {
   }
 
   /**
+   * Appends events to a job's store without changing its done/pending status.
+   * Called from queue workers to stream individual shots as they generate.
+   */
+  async appendJobEvents(jobId: string, events: ChatEvent[]): Promise<void> {
+    const existing = await this.ctx.storage.get<ChatEvent[]>(`job:${jobId}:events`) ?? [];
+    await this.ctx.storage.put(`job:${jobId}:events`, [...existing, ...events]);
+  }
+
+  /**
    * Polling endpoint for async jobs (image gen, video gen).
    * Returns stored events once the job is complete.
    */
@@ -417,55 +425,21 @@ export class Responser extends DurableObject<ResponserEnv> {
         return new StorytellerTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
       },
-      photoshoot_planner: async () => {
-        await this.sendEvent({ type: "status", content: "Building photoshoot plan..." });
-        return new PhotoshootPlannerTool(this.textService, this.env as any)
-          .run(this.currentInput, ctx);
-      },
       avatar_generator: async () => {
         await this.sendEvent({ type: "status", content: "Designing model personas..." });
         return new AvatarGeneratorTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
+      },
+      shoot_engine_planner: async () => {
+        await this.sendEvent({ type: "status", content: "Preparing campaign shoot plan..." });
+        const { ShootEngineTool } = await import("../services/chat/tools/ShootEngineTool");
+        return new ShootEngineTool().run(this.currentInput, ctx);
       },
     };
 
     if (syncTools[task.tool]) {
       const result = await syncTools[task.tool]();
       await this.handleToolResult(task.tool, result);
-      return;
-    }
-
-    // ── Image sequential expansion ─────────────────────────────────────────
-    // Expand plannedShots into individual tasks so each image streams as soon
-    // as it's ready instead of waiting for the whole batch.
-    if (task.tool === "photoshoot_generator" && !task.input?.shot) {
-      const shots = this.memory.plannedShots ?? [];
-
-      if (shots.length === 0) {
-        // Planner was skipped or returned empty — insert it now and retry generator after.
-        this.memory.flowControl.pendingTasks.unshift(
-          { id: "replan", tool: "photoshoot_planner" as const, input: this.currentInput },
-          { id: "regen", tool: "photoshoot_generator" as const, input: {} }
-        );
-        await this.persist();
-        await this.runNextStep();
-        return;
-      }
-
-      await this.sendEvent({
-        type: "status",
-        content: `Generating ${shots.length} shots...`,
-      });
-
-      this.memory.flowControl.pendingTasks.unshift(
-        ...shots.map((shot: any) => ({
-          id: `shot-${shot.id}`,
-          tool: "photoshoot_generator" as const,
-          input: { shot, projectId: this.memory.projectId },
-        }))
-      );
-      await this.persist();
-      await this.runNextStep();
       return;
     }
 
@@ -811,6 +785,9 @@ export class Responser extends DurableObject<ResponserEnv> {
       avatar_prefs: (v) => ({
         campaign: { ...this.memory.campaign, avatarPrefs: v },
       }),
+      avatar_custom_desc: (v) => ({
+        campaign: { ...this.memory.campaign, avatarCustomDesc: v },
+      }),
     };
 
     const extractor = EXTRACTORS[pending.id];
@@ -844,8 +821,8 @@ export class Responser extends DurableObject<ResponserEnv> {
     };
 
     const queueMap: Record<string, Queue> = {
-      photoshoot_generator: this.env.IMAGE_QUEUE,
-      video_generator:      this.env.VIDEO_QUEUE,
+      shoot_engine:   this.env.IMAGE_QUEUE,
+      video_generator: this.env.VIDEO_QUEUE,
     };
 
     const queue = queueMap[task.tool] ?? this.env.LLM_QUEUE;

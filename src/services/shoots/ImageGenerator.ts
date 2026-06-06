@@ -16,32 +16,52 @@ export class ImageGenerator {
     shootPrompt: ShootPrompt,
     pkg: ShootPackage,
     userId: string,
-    projectId: string
+    projectId: string,
+    modelBytes?: { data: string; mimeType: string } | null
   ): Promise<GeneratedShot> {
-    // Build multipart form — Workers native FormData + fetch, no SDK needed
-    const form = new FormData()
-    form.append('model', 'gpt-image-2')
-    form.append('prompt', shootPrompt.prompt)
-    form.append('size', '1024x1536')  // portrait, closest to 9:16
-    form.append('n', '1')
+    const productBytes = Uint8Array.from(atob(pkg.asset.base64), c => c.charCodeAt(0))
+    const productBlob  = new Blob([productBytes], { type: pkg.asset.mimeType || 'image/jpeg' })
 
-    // Attach reference product image
-    const imageBytes = Uint8Array.from(atob(pkg.asset.base64), c => c.charCodeAt(0))
-    const imageBlob = new Blob([imageBytes], { type: pkg.asset.mimeType || 'image/jpeg' })
-    form.append('image[]', imageBlob, 'product.jpg')
+    const modelBlob = modelBytes
+      ? new Blob([Uint8Array.from(atob(modelBytes.data), c => c.charCodeAt(0))], { type: modelBytes.mimeType || 'image/jpeg' })
+      : null
 
-    const res = await fetch('https://api.openai.com/v1/images/edits', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}` },
-      body: form,
-    })
+    // When a model reference is provided, extend the prompt so OpenAI knows what to do with it
+    const finalPrompt = modelBlob
+      ? `${shootPrompt.prompt}\n\nA model reference image is provided alongside the product. The human in this shoot must resemble that person — same face, build, and appearance. They must be wearing the product.`
+      : shootPrompt.prompt
 
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`OpenAI image edit failed (${res.status}): ${err}`)
+    const buildForm = () => {
+      const f = new FormData()
+      f.append('model', 'gpt-image-2')
+      f.append('prompt', finalPrompt)
+      f.append('size', '1024x1536')
+      f.append('n', '1')
+      f.append('image[]', productBlob, 'product.jpg')
+      if (modelBlob) f.append('image[]', modelBlob, 'model.jpg')
+      return f
     }
 
-    const json: any = await res.json()
+    let res: Response | null = null
+    let lastError = ''
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      res = await fetch('https://api.openai.com/v1/images/edits', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}` },
+        body: buildForm(),
+      })
+      if (res.ok) break
+      lastError = await res.text()
+      console.warn(`[ImageGenerator] Attempt ${attempt} failed (${res.status}): ${lastError}`)
+      if (res.status !== 503 && res.status !== 429) break
+      await new Promise(r => setTimeout(r, attempt * 3000))
+    }
+
+    if (!res!.ok) {
+      throw new Error(`OpenAI image edit failed (${res!.status}): ${lastError}`)
+    }
+
+    const json: any = await res!.json()
     const b64 = json?.data?.[0]?.b64_json
     if (!b64) throw new Error(`ImageGenerator: no image in OpenAI response for shoot ${shootPrompt.shootIndex}`)
 

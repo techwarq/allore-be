@@ -2,10 +2,9 @@ import { ToolRegistry } from "./ToolRegistry";
 import { ToolCatalog } from "./ToolCatalog";
 import { StorytellerTool } from "./tools/StorytellerTool";
 import { CreativeStudioTool } from "./tools/CreativeStudioTool";
-import { PhotoshootPlannerTool } from "./tools/PhotoshootPlannerTool";
-import { PhotoshootGeneratorTool } from "./tools/PhotoshootGeneratorTool";
 import { AvatarGeneratorTool } from "./tools/AvatarGeneratorTool";
 import { MemoryRecallTool } from "./tools/MemoryRecallTool";
+import { ShootEngineTool } from "./tools/ShootEngineTool";
 import { Tool, ToolContext } from "./tools/Tool";
 import { ToolResponse } from "../../types/chat";
 import { TextService } from "../gemini/TextService";
@@ -25,10 +24,10 @@ export function getStandardToolCatalog(env: any, textService?: TextService): Too
     .register(new MemoryRecallTool(env))
     .register(new StorytellerTool(textService || env, textService ? env : undefined))
     .register(new CreativeStudioTool(textService || env, textService ? env : undefined))
-    .register(new PhotoshootPlannerTool(textService || env, textService ? env : undefined))
-    .register(new PhotoshootGeneratorTool(env, textService))
+    .register(new ShootEngineTool())
     .register(new AvatarGeneratorTool(textService || env, textService ? env : undefined))
-    // Tools that exist in the prompt but are handled by external queues
+    // Tools handled by external queues — registered so IntentEngine knows they exist
+    .register(new QueueTool("shoot_engine", "Async queue worker that runs the full ShootEngine pipeline. Not called directly — queued by shoot_engine_planner."))
     .register(new QueueTool("video_generator", "Generates motion and video content from visual assets."))
     .register(new QueueTool("instapost_generator", "Creates social media posts and captions for Instagram."))
     .register(new QueueTool("pinterest_style_analyser", "Analyses visual references and styles from Pinterest-like moodboards."));
