@@ -28,6 +28,7 @@ import suggestions from './routes/suggestions'
 import waitlist from './routes/waitlist'
 import creative from './routes/creative'
 import shoots from './routes/shoots'
+import feedback from './routes/feedback'
 import dev from './routes/dev'
 import { sessionMiddleware, type AuthVariables } from './middleware/auth'
 import { GlobalLimiter } from './durable-objects/GlobalLimiter'
@@ -61,6 +62,7 @@ type Bindings = {
   IMAGE_QUEUE: Queue
   VIDEO_QUEUE: Queue
   OPENAI_API_KEY: string
+  PREPROCESSOR_URL?: string
 }
 
 const app = new Hono<{ Bindings: Bindings, Variables: AuthVariables }>()
@@ -72,7 +74,9 @@ app.use('*', async (c, next) => {
     'http://localhost:3001',
     'https://www.alloreai.com',
     'https://alloreai.com',
-    'https://waitlist.alloreai.com'
+    'https://waitlist.alloreai.com',
+    'https://techwarq.space',
+    'https://www.techwarq.space'
   ];
   
   // Also include the environment variable if set
@@ -130,6 +134,7 @@ app.route('/suggestions', suggestions)
 app.route('/api', waitlist)
 app.route('/creative', creative)
 app.route('/shoots', shoots)
+app.route('/feedback', feedback)
 app.route('/dev', dev)
 
 // --- Protected Routes ---
@@ -242,16 +247,41 @@ export default {
               OPENAI_API_KEY: env.OPENAI_API_KEY,
               DATABASE_URL: env.DATABASE_URL,
               ASSETS_BUCKET: env.ASSETS_BUCKET,
+              PREPROCESSOR_URL: env.PREPROCESSOR_URL,
             });
 
-            // Stream each event back to the DO as it arrives so the client sees
-            // shots and status updates immediately when polling — don't batch at end.
+            // Resolve inputs — prefer explicit task input, fall back to session memory
+            // so context from prior turns (uploads, avatar images) is always available.
+            const resolvedAssetIds: string[] =
+              input.assetIds?.length
+                ? input.assetIds
+                : (memory?.product?.assetIds ?? (memory?.product?.primaryAssetId ? [memory.product.primaryAssetId] : []));
+
+            const resolvedModelR2Keys: string[] =
+              input.modelR2Keys?.length
+                ? input.modelR2Keys
+                : (memory?.campaign?.avatarImages ?? []).map((a: any) => a.r2Key).filter(Boolean);
+
+            const resolvedProjectId: string = input.projectId || memory?.projectId || 'default';
+            const resolvedUserId: string    = input.userId || userId;
+
+            // Stream each event back to the DO as it arrives — appendJobEvents
+            // forwards to the open SSE writer so client sees shots in real-time.
+            // If the user clicked stop, appendJobEvents returns { cancelled: true }
+            // and we throw to abort engine.run() immediately.
             const stub = getDoStub();
             await engine.run(
-              { intent: input.intent, assetIds: input.assetIds, projectId: input.projectId, userId: input.userId },
+              {
+                intent: input.intent,
+                assetIds: resolvedAssetIds,
+                projectId: resolvedProjectId,
+                userId: resolvedUserId,
+                modelR2Keys: resolvedModelR2Keys,
+              },
               async (event: any) => {
                 if (event.type !== 'done' && jobId) {
-                  await stub.appendJobEvents(jobId, [event]);
+                  const { cancelled } = await stub.appendJobEvents(jobId, [event]);
+                  if (cancelled) throw new Error('Cancelled by user');
                 }
               }
             );

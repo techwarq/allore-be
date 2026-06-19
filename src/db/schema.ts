@@ -412,3 +412,10 @@ export const memInsights = pgTable('mem_insights', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+export const feedback = pgTable('feedback', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  message: text('message').notNull(),
+  email: text('email'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
