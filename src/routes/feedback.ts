@@ -12,6 +12,12 @@ const schema = z.object({
   email: z.string().email().optional(),
 })
 
+router.get('/', async (c) => {
+  const db = getDb(c.env.DATABASE_URL)
+  const rows = await db.select().from(feedback).orderBy(feedback.createdAt)
+  return c.json(rows)
+})
+
 router.post('/', async (c) => {
   const body = await c.req.json()
   const result = schema.safeParse(body)
