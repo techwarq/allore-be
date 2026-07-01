@@ -24,6 +24,10 @@ node_modules/
 wrangler.jsonc
 worker-configuration.d.ts
 
+# local scratch/utility scripts (may contain hardcoded secrets)
+scratch/
+scripts/
+
 # logs
 logs/
 *.log
