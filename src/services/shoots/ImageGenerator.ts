@@ -1,7 +1,7 @@
 import { base64ToArrayBuffer } from '../../lib/r2'
 import { getDb } from '../../db'
 import { privateAssets } from '../../db/schema'
-import { ShootPrompt, ShootPackage, GeneratedShot } from '../../types/shoots'
+import { ShootPrompt, ShootPackage, GeneratedShot, AssetWithSpec } from '../../types/shoots'
 
 interface ImageGenEnv {
   OPENAI_API_KEY: string
@@ -15,29 +15,52 @@ export class ImageGenerator {
   async generate(
     shootPrompt: ShootPrompt,
     pkg: ShootPackage,
+    allAssets: AssetWithSpec[],
     userId: string,
     projectId: string,
-    modelBytes?: { data: string; mimeType: string } | null
+    modelBytes?: { data: string; mimeType: string } | null,
   ): Promise<GeneratedShot> {
-    const productBytes = Uint8Array.from(atob(pkg.asset.base64), c => c.charCodeAt(0))
-    const productBlob  = new Blob([productBytes], { type: pkg.asset.mimeType || 'image/jpeg' })
-
     const modelBlob = modelBytes
       ? new Blob([Uint8Array.from(atob(modelBytes.data), c => c.charCodeAt(0))], { type: modelBytes.mimeType || 'image/jpeg' })
       : null
 
-    // When a model reference is provided, extend the prompt so OpenAI knows what to do with it
-    const finalPrompt = modelBlob
-      ? `${shootPrompt.prompt}\n\nA model reference image is provided alongside the product. The human in this shoot must resemble that person — same face, build, and appearance. They must be wearing the product.`
-      : shootPrompt.prompt
+    const promptParts = [shootPrompt.prompt]
+    if (modelBlob) {
+      promptParts.push(`Model Reference: The human in this shoot must resemble the model reference image exactly — same face, build, and appearance. They must be wearing the product from Image 0.`)
+    }
+    const finalPrompt = promptParts.join('\n\n')
+
+    const quality = (pkg.modelType === 'infographic' || pkg.modelType === 'ui_mockup') ? 'high' : 'medium'
+
+    // Order assets to match the manifest that PromptMaker built.
+    // orderedAssetIds tells us the full-image order; crops follow each asset immediately after.
+    const orderedAssets = shootPrompt.orderedAssetIds.length > 0
+      ? shootPrompt.orderedAssetIds
+          .map(id => allAssets.find(a => a.id === id))
+          .filter((a): a is AssetWithSpec => !!a)
+      : [pkg.asset, ...allAssets.filter(a => a.id !== pkg.asset.id)]
 
     const buildForm = () => {
       const f = new FormData()
       f.append('model', 'gpt-image-2')
       f.append('prompt', finalPrompt)
-      f.append('size', '1024x1536')
+      f.append('size', '1536x1024')
+      f.append('quality', quality)
       f.append('n', '1')
-      f.append('image[]', productBlob, 'product.jpg')
+
+      // Full-view images in priority order, crops appended immediately after each asset
+      for (const asset of orderedAssets) {
+        const bytes = Uint8Array.from(atob(asset.base64), c => c.charCodeAt(0))
+        f.append('image[]', new Blob([bytes], { type: asset.mimeType || 'image/jpeg' }), `asset_${asset.id}.jpg`)
+
+        if (asset.crops && asset.crops.length > 0) {
+          for (const crop of asset.crops) {
+            const cropBytes = Uint8Array.from(atob(crop.data), c => c.charCodeAt(0))
+            f.append('image[]', new Blob([cropBytes], { type: crop.mimeType || 'image/jpeg' }), `crop_${crop.name}.jpg`)
+          }
+        }
+      }
+
       if (modelBlob) f.append('image[]', modelBlob, 'model.jpg')
       return f
     }
@@ -65,7 +88,6 @@ export class ImageGenerator {
     const b64 = json?.data?.[0]?.b64_json
     if (!b64) throw new Error(`ImageGenerator: no image in OpenAI response for shoot ${shootPrompt.shootIndex}`)
 
-    // Store to R2
     const r2Key = `photoshoots/${userId}/${projectId}/${Date.now()}-shot${shootPrompt.shootIndex}.jpg`
     await this.env.ASSETS_BUCKET.put(
       r2Key,
@@ -73,7 +95,6 @@ export class ImageGenerator {
       { httpMetadata: { contentType: 'image/png' } }
     )
 
-    // Save asset record
     const assetId = crypto.randomUUID()
     const db = getDb(this.env.DATABASE_URL)
     await db.insert(privateAssets).values({
@@ -99,6 +120,7 @@ export class ImageGenerator {
       concept: shootPrompt.concept,
       theme: pkg.theme,
       url: `/assets/private/${encodeURIComponent(r2Key)}`,
+      generatedBase64: b64,
     }
   }
 }

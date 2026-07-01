@@ -125,6 +125,7 @@ export interface SessionMemory {
   flowControl: {
     pendingQuestion: { id: string } | null;
     pendingTasks: Task[];
+    activeShootJobId?: string;
   };
   plannedShots?: any[];
   productLock?: any;

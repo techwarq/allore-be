@@ -1,11 +1,14 @@
 export type IntentPlan = {
-  overallStyle: 'editorial' | 'lifestyle' | 'detail' | 'mixed'
+  overallStyle: 'editorial' | 'lifestyle' | 'detail' | 'mixed' | 'infographic' | 'ui_mockup'
   mood: string
   background: string
+  stylingDirectives: string
   countHint: number
   colorDirection: string
   rawIntent: string
   assetIds: string[]
+  // Present when intent is a numbered placement list — each item locks one shoot's scene placement
+  sceneDirectives?: string[]
 }
 
 export type ProductSpec = {
@@ -45,12 +48,42 @@ export type ProductSpec = {
   functionalElements?: string // "flip-top lid", "adjustable strap", "touch sensor strip"
 }
 
+export type ViewType =
+  | 'full_front'
+  | 'full_back'
+  | 'three_quarter'
+  | 'side'
+  | 'detail_top'
+  | 'detail_bottom'
+  | 'detail_center'
+  | 'detail_texture'
+  | 'flat_lay'
+  | 'lifestyle'
+  | 'packaging'
+  | 'unknown'
+
+export type ViewAnnotation = {
+  assetId: string
+  viewType: ViewType
+  contributes: string  // what unique info this view adds — e.g. "back construction and zip closure"
+  priority: number     // 0 = best full reference; lower = sent as earlier image to GPT-image-2
+}
+
+export type AssetCrop = {
+  name: string
+  description: string
+  data: string        // base64
+  mimeType: string
+}
+
 export type AssetWithSpec = {
   id: string
   r2Key: string
   mimeType: string
   base64: string
   productSpec: ProductSpec
+  viewAnnotation?: ViewAnnotation
+  crops?: AssetCrop[]
 }
 
 export type ShootPackage = {
@@ -58,17 +91,28 @@ export type ShootPackage = {
   theme: string
   concept: string
   angle: 'front' | 'back' | '3/4' | 'side' | 'detail_top' | 'detail_bottom' | 'detail_feature' | 'overhead' | 'close_up'
+  productAction: string  // dynamic product state — "being poured at 45°", "lying on its side", "mid-air drop", "submerged in ice", "hand gripping mid-body", etc.
   background: string
   lighting: string
-  modelType: 'on_model' | 'flat_lay' | 'product_only' | 'lifestyle' | 'mannequin'
+  modelType: 'on_model' | 'flat_lay' | 'product_only' | 'lifestyle' | 'mannequin' | 'ui_mockup' | 'infographic'
   mood: string
   asset: AssetWithSpec
+}
+
+export type ImageManifestEntry = {
+  index: number
+  role: 'primary_product' | 'model_reference' | `zone_${string}`
+  label: string       // e.g. "Image 0: Primary Product Asset"
+  description: string // what this image shows
 }
 
 export type ShootPrompt = {
   shootIndex: number
   prompt: string
   concept: string
+  selectedZones: string[]
+  imageManifest: ImageManifestEntry[]
+  orderedAssetIds: string[]  // full-image assets in the order they'll appear in the FormData (Image 0, 1, ...)
 }
 
 export type GeneratedShot = {
@@ -78,6 +122,19 @@ export type GeneratedShot = {
   concept: string
   theme: string
   url: string
+  generatedBase64?: string  // available temporarily for quality review, not persisted
+}
+
+export type ProductGroup = {
+  groupId: string
+  productLabel: string   // "white cotton bath towels", "navy hand towels", "decorative cushions"
+  assetIds: string[]     // which uploaded images belong to this product
+  intentPlan: IntentPlan // per-group decoded intent with the right shoots for this product
+}
+
+export type AssetTag = {
+  productLabel: string  // what the product is, e.g. "navy cotton t-shirt"
+  viewType: ViewType    // angle/view the image shows
 }
 
 export type ShootEngineInput = {
@@ -86,4 +143,6 @@ export type ShootEngineInput = {
   projectId: string
   userId: string
   modelR2Keys?: string[]  // avatar R2 keys to use as model references in on_model shots
+  assetTags?: Record<string, AssetTag>  // assetId → tag (product + angle), replaces AI classification
+  dryRun?: boolean  // if true, stop after prompt generation — no image calls
 }

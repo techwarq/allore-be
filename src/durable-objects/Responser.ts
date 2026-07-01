@@ -40,6 +40,7 @@ export interface ResponserEnv {
   VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY?: string;
   DATABASE_URL: string;
   API_URL: string;
+  OPENAI_API_KEY: string;
   LLM_QUEUE: Queue;
   IMAGE_QUEUE: Queue;
   VIDEO_QUEUE: Queue;
@@ -288,12 +289,27 @@ export class Responser extends DurableObject<ResponserEnv> {
   }
 
   /**
-   * Appends events to a job's store without changing its done/pending status.
-   * Called from queue workers to stream individual shots as they generate.
+   * Called from the queue worker per-event as shots generate.
+   * Returns { cancelled: true } if the user hit stop — queue worker should throw
+   * to abort engine.run() immediately rather than generating more shots.
    */
-  async appendJobEvents(jobId: string, events: ChatEvent[]): Promise<void> {
+  async appendJobEvents(jobId: string, events: ChatEvent[]): Promise<{ cancelled: boolean }> {
+    // Check cancellation flag first — skip storage/stream work if cancelled
+    const cancelled = (await this.ctx.storage.get<boolean>(`job:${jobId}:cancelled`)) ?? false;
+    if (cancelled) return { cancelled: true };
+
+    // Always persist for durability / polling fallback
     const existing = await this.ctx.storage.get<ChatEvent[]>(`job:${jobId}:events`) ?? [];
     await this.ctx.storage.put(`job:${jobId}:events`, [...existing, ...events]);
+
+    // Forward to open SSE stream (the no-polling fast path)
+    if (this.writer) {
+      for (const event of events) {
+        await this.sendEvent(event);
+      }
+    }
+
+    return { cancelled: false };
   }
 
   /**
@@ -316,6 +332,14 @@ export class Responser extends DurableObject<ResponserEnv> {
     this.abortController = null;
     this.memory.flowControl.pendingTasks = [];
 
+    // If a shoot queue job is running, write a cancellation flag.
+    // The queue worker checks this flag via appendJobEvents and will throw to abort engine.run().
+    const activeShootJobId = this.memory.flowControl.activeShootJobId;
+    if (activeShootJobId) {
+      await this.ctx.storage.put(`job:${activeShootJobId}:cancelled`, true);
+      this.memory.flowControl.activeShootJobId = undefined;
+    }
+
     if (this.writer) {
       try {
         await this.sendEvent({ type: "done" });
@@ -325,6 +349,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       this.writer = null;
     }
 
+    await this.persist();
     return { success: true, message: "Request cancelled successfully." };
   }
 
@@ -443,9 +468,34 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
-    // ── Async slow path (image gen, video gen) ────────────────────────────────
-    // The DO will hibernate while these queue jobs run. The TransformStream
-    // writer is in-memory only and won't survive hibernation, so we:
+    // ── ShootEngine — queued, but SSE stays open ─────────────────────────────
+    // Queue does the heavy lifting (retries, rate limiting).
+    // appendJobEvents RPC forwards each shot back through this writer in real-time.
+    // Client sees a single stream — no polling needed.
+    if (task.tool === 'shoot_engine') {
+      // Clear 90s timeout — shoot gen takes several minutes
+      if (this.lockTimeout) {
+        clearTimeout(this.lockTimeout);
+        this.lockTimeout = null;
+      }
+      const jobId = crypto.randomUUID();
+      await this.ctx.storage.put(`job:${jobId}:status`, 'pending');
+      await this.ctx.storage.put(`job:${jobId}:events`, [] as ChatEvent[]);
+      await this.ctx.storage.put(`job:${jobId}:pendingCount`, 1);
+
+      // Track so cancel() can signal the queue worker to stop
+      this.memory.flowControl.activeShootJobId = jobId;
+      await this.persist();
+
+      const taskInput = task.input && Object.keys(task.input).length > 0
+        ? task.input
+        : this.currentInput;
+      // Stream stays open — appendJobEvents will push events as they arrive
+      await this.enqueueTask(task, taskInput, jobId);
+      return;
+    }
+
+    // ── Async slow path (queued jobs — video gen etc.) ────────────────────────
     //   1. Send a "queued" event so the client knows to switch to polling
     //   2. Close the stream and release the lock immediately
     //   3. Queue ALL remaining tasks at once (no serial waiting)
@@ -821,7 +871,6 @@ export class Responser extends DurableObject<ResponserEnv> {
     };
 
     const queueMap: Record<string, Queue> = {
-      shoot_engine:   this.env.IMAGE_QUEUE,
       video_generator: this.env.VIDEO_QUEUE,
     };
 

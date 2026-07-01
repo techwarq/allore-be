@@ -14,6 +14,7 @@ type ShootsBindings = {
   VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: string
   OPENAI_API_KEY: string
   ASSETS_BUCKET: R2Bucket
+  PREPROCESSOR_URL?: string
 }
 
 const DEV_EMAIL = 'dev@alloreai.com'
@@ -36,7 +37,7 @@ const shoots = new Hono<{ Bindings: ShootsBindings }>()
  */
 shoots.post('/generate', async (c) => {
   const body = await c.req.json()
-  const { intent, assetIds, projectId, userId } = body
+  const { intent, assetIds, projectId, userId, assetTags } = body
 
   if (!intent || !Array.isArray(assetIds) || assetIds.length === 0) {
     return c.json({ error: 'Missing required fields: intent, assetIds' }, 400)
@@ -51,6 +52,7 @@ shoots.post('/generate', async (c) => {
     OPENAI_API_KEY: c.env.OPENAI_API_KEY,
     DATABASE_URL: c.env.DATABASE_URL,
     ASSETS_BUCKET: c.env.ASSETS_BUCKET,
+    PREPROCESSOR_URL: c.env.PREPROCESSOR_URL,
   })
 
   return streamSSE(c, async (stream) => {
@@ -66,13 +68,90 @@ shoots.post('/generate', async (c) => {
         resolvedUserId = ctx.userId
         resolvedProjectId = resolvedProjectId || ctx.projectId
       }
-      await engine.run({ intent, assetIds, projectId: resolvedProjectId || 'default', userId: resolvedUserId }, send)
+      await engine.run({ intent, assetIds, projectId: resolvedProjectId || 'default', userId: resolvedUserId, assetTags }, send)
     } catch (err: any) {
       await send({ type: 'error', message: err.message || 'Shoot engine failed' })
     } finally {
       await stream.close()
     }
   })
+})
+
+/**
+ * POST /shoots/plan
+ * Dry-run: streams the full pipeline up through prompt generation but skips image model calls.
+ * Returns 'prompt' SSE events with the final prompt text and image manifest for each shoot.
+ * Body: same as /shoots/generate
+ */
+shoots.post('/plan', async (c) => {
+  const body = await c.req.json()
+  const { intent, assetIds, projectId, userId, assetTags } = body
+
+  if (!intent || !Array.isArray(assetIds) || assetIds.length === 0) {
+    return c.json({ error: 'Missing required fields: intent, assetIds' }, 400)
+  }
+
+  const engine = new ShootEngine({
+    GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+    VERTEX_PROJECT_ID: c.env.VERTEX_PROJECT_ID,
+    VERTEX_LOCATION: c.env.VERTEX_LOCATION,
+    VERTEX_SERVICE_ACCOUNT_EMAIL: c.env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+    VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: c.env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY,
+    OPENAI_API_KEY: c.env.OPENAI_API_KEY,
+    DATABASE_URL: c.env.DATABASE_URL,
+    ASSETS_BUCKET: c.env.ASSETS_BUCKET,
+    PREPROCESSOR_URL: c.env.PREPROCESSOR_URL,
+  })
+
+  return streamSSE(c, async (stream) => {
+    const send = async (event: object) => {
+      await stream.write(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`))
+    }
+
+    try {
+      let resolvedUserId = userId
+      let resolvedProjectId = projectId
+      if (!resolvedUserId || resolvedUserId === 'dev') {
+        const ctx = await resolveDevContext(c.env.DATABASE_URL)
+        resolvedUserId = ctx.userId
+        resolvedProjectId = resolvedProjectId || ctx.projectId
+      }
+      await engine.run(
+        { intent, assetIds, projectId: resolvedProjectId || 'default', userId: resolvedUserId, assetTags, dryRun: true },
+        send,
+      )
+    } catch (err: any) {
+      await send({ type: 'error', message: err.message || 'Shoot engine failed' })
+    } finally {
+      await stream.close()
+    }
+  })
+})
+
+/**
+ * GET /shoots/crops/:assetId
+ * Lists all crops saved for a given source asset.
+ * Crops are stored at crops/{userId}/{projectId}/{assetId}/*.jpg
+ * Returns { crops: [{ name, url, r2Key }] }
+ */
+shoots.get('/crops/:assetId', async (c) => {
+  const assetId = c.req.param('assetId')
+  const prefix = `crops/`
+
+  // List all R2 objects whose key contains this assetId
+  const listed = await c.env.ASSETS_BUCKET.list({ prefix })
+  const matching = listed.objects.filter(o => o.key.includes(`/${assetId}/`))
+
+  const crops = matching.map(o => {
+    const name = o.key.split('/').pop()?.replace(/\.[^.]+$/, '') ?? o.key
+    return {
+      name,
+      r2Key: o.key,
+      url: `/assets/download?key=${encodeURIComponent(o.key)}`,
+    }
+  })
+
+  return c.json({ assetId, crops })
 })
 
 export default shoots

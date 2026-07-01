@@ -44,6 +44,7 @@ export class TextService extends BaseGeminiService implements ITextService {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
@@ -84,6 +85,7 @@ export class TextService extends BaseGeminiService implements ITextService {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!response.ok) {

@@ -1,66 +1,65 @@
-import { TextService } from '../gemini/TextService'
+import { OpenAITextService } from '../openai/OpenAITextService'
 import { ProductSpec } from '../../types/shoots'
 
 export class GarmentForensics {
-  constructor(private textService: TextService) {}
+  constructor(private openai: OpenAITextService) {}
 
-  async analyze(base64Image: string, mimeType: string): Promise<ProductSpec> {
-    const response = await this.textService.generate({
-      model: 'gemini-3-flash-preview',
-      systemInstruction: `You are a Senior Computer Vision Product Design Analyst and Industrial Fabric Forensic Expert.
+  async analyze(base64Image: string, mimeType: string, productHint?: string): Promise<ProductSpec> {
+    const hintBlock = productHint
+      ? `\n\nCRITICAL PRODUCT CLASSIFICATION: The seller has identified this product as "${productHint}". You MUST accept this classification — do not reclassify it into a different product type. Your "productType" field must be a technically precise description of a ${productHint}. Focus only on accurately describing its physical attributes.`
+      : ''
 
-Analyze any raw product asset with absolute technical precision. Strip away the background clutter. Your job is to extract the literal structural architecture, geometric primitives, and micro-texture markers of the product. This data will be used to freeze the product's identity so it never distorts, warps, or stretches under any canvas manipulation.`,
-      contents: [{
-        role: 'user',
-        parts: [
-          { inlineData: { mimeType, data: base64Image } },
-          {
-            text: `Analyze this D2C product image using the Hyper-Realistic Product DNA schema.
+    const system = `You are a Senior Computer Vision Analyst, Metrology Engineer, and Industrial Fabric Forensic Expert.
 
-Return a JSON object with this exact structure (raw JSON, no markdown):
+Your sole function is to deconstruct any raw product asset photograph with cold, mathematical precision. Completely ignore all background noise, warehouse storage conditions, studio clutter, unwanted hand shadows, mobile screen reflections, styling props, garnishes, ingredients, surfaces, and any decorative objects placed around the product.
+
+CRITICAL — PRIMARY PRODUCT ONLY: Identify the single PRIMARY MANUFACTURED AND BRANDED PRODUCT in the image — the object that was physically produced, labeled, and sold. Everything else is a prop. If you see a beverage can styled with ice cubes, chili garnishes, or liquid, describe ONLY the can. If you see an apparel item on a surface with flowers or books, describe ONLY the apparel item. If you see a skincare bottle on a marble surface with greenery, describe ONLY the bottle. Props and styling around the product are completely irrelevant — omit them entirely from every field.
+
+Focus exclusively on extracting the core commercial product asset's literal geometry, material reflections, and proportional boundaries.
+
+Your output feeds directly into an advanced AI image editing pipeline as non-negotiable structural constraints. Accuracy here determines whether the final rendering preserves the true brand identity or distorts. Be absolutely literal, industrial, and technical. Completely ban all vague marketing or artistic language like "sleek," "elegant," or "beautiful" — replace with cold industrial descriptors.${hintBlock}`
+
+    const userText = `Analyze this D2C product image using the Universal Product Identity & Geometric Fidelity schema.
+
+Return a JSON object with this exact structure (raw JSON only, no markdown blocks, no formatting backticks):
 {
-  "productType": "uncompromisingly specific name, e.g., '8 oz matte aluminum beverage can', 'heavyweight 450gsm loopback cotton hoodie'",
+  "productType": "uncompromisingly specific name, e.g., '8 oz cylindrical matte aluminum beverage can', '450gsm heavyweight loopback cotton boxy hoodie', 'quilted cotton canvas bedsheet set'",
   "category": "one of: apparel, footwear, beauty, skincare, electronics, tableware, furniture, food, jewellery, accessories, bags, homeware, other",
 
-  "formGeometry": "CRITICAL: Define the mathematical shapes, primitives, and curves to lock down perspective. E.g., 'Perfect cylinder with unbending right-angle top lip and flat tapered base block. Must lock horizontal-to-vertical ratio to prevent oval distortion under 16:9 framing.'",
+  "formGeometry": "CRITICAL GEOMETRY LOCK: Define the exact mathematical primitives, shapes, grid patterns, and structural bounds. E.g., 'Perfect flat rectangular canvas plane with orthogonal 90-degree parallel matrix coordinates. Must lock horizontal-to-vertical pattern diameter ratio to prevent any geometric warping or oval motif skewing under wide aspect ratio transformations.'",
 
-  "materials": ["exact structural materials, e.g., 'brushed raw silver aluminum', '100% organic open-end slub cotton texturized knit'"],
-  "finish": "precise micro-surface texture descriptor, e.g., 'powder-coated matte with fine tactile grain', 'high-gloss reflective glazing'",
+  "materials": ["array of exact raw materials and light-absorption profiles — e.g., '100% organic long-staple open-end slub cotton texturized knit', 'matte powder-coated low-sheen vinyl wrap'"],
+  "finish": "precise micro-surface texture descriptor and tactile quality — e.g., 'matte anti-glare woven powder finish', 'high-gloss reflective specular glazing', 'raised embroidery thread relief lines'",
 
   "colorProfile": {
-    "primary": "exact tone and light interaction, e.g., 'matte desaturated sky-blue', 'flat high-absorption obsidian black'",
-    "secondary": "secondary color accents if present, otherwise omit",
+    "primary": "exact color tone and light-absorption behavior — e.g., 'flat high-absorption matte ivory cream', 'specular high-gloss obsidian black'",
+    "secondary": "secondary color accents or pattern graphics if clearly present, otherwise omit field",
     "pattern": "one of: solid, gradient, striped, printed, textured, multicolor, clear"
   },
 
-  "dimensions": "structural height-to-width spatial ratio to act as a strict aspect guard against wide-canvas stretching.",
+  "dimensions": "strict height-to-width spatial aspect ratio to act as a hard mathematical guard against wide-canvas or cinematic stretching, e.g., 'strict 1.6:1 horizontal width-to-height ratio for the pillow face panel layout'.",
 
-  "spatialAnchor": "NON-NEGOTIABLE CORE ANCHOR: The absolute physical grounding property. E.g., 'Sits perfectly flat on a level plane; vertical center axis must remain perfectly 90-degrees straight, cap/lip defines the top horizontal boundary.'",
+  "spatialAnchor": "CRITICAL BOUNDARY ANCHOR — The non-negotiable physical grounding rule that prevents perspective distortion. E.g., 'Sits perfectly flat on a horizontal level plane; vertical grid axes must remain perfectly parallel with zero taper; seams define the absolute spatial boundary lines.'",
 
-  "keyDetails": ["array of every single micro-element: sharp sans-serif black print typography, specific text strings, tiny warning symbols, ridges, stitches, pull-tabs, seams, etc."],
-  "premiumDetails": ["quality indicators that give the asset high-end reality: brushed metal grain, embossed textures, raw fiber fraying, contrast lock-stitching. Empty array [] if none."],
+  "keyDetails": ["ALL visible structural details of the PRIMARY PRODUCT ONLY — exact text strings, specific typography fonts, print layouts, seams, folds, ridges, buttons, pull-tabs, warning icons, micro-stitching patterns. DO NOT include props, garnishes, or styling elements."],
+  "premiumDetails": ["standout craft quality markers that ground the item in high-end reality — e.g., 'raised directional embroidery yarn grain along border lines', 'contrast double lock-stitching along panel joints'. Empty array [] if none."],
 
-  "contrastBoundary": "optical separation rule, e.g., 'must be placed on a raw texturized dark stone or organic surface to crisply isolate and bounce light off the light-colored base silhouettes.'",
+  "contrastBoundary": "optical boundary rule for edge detection — e.g., 'must be placed on dark texturized volcanic stone or weathered dark wood to cleanly isolate and define the light-colored base silhouettes.'",
 
-  "brandMarkings": "exact case-sensitive brand text strings, locations, font weight behavior on the package. Omit if none.",
-  "functionalElements": "mechanical or usable parts: pull-tab on top center, pump nozzle, zipper tracks. Omit if none."
+  "brandMarkings": "exact case-sensitive brand text strings, placement coordinates, and font weight interaction on the package layout. Omit if none.",
+  "functionalElements": "mechanical or interactive parts that must remain mathematically sound: pull-tab on top center, spray nozzle head, zipper tracks, lace eyelets. Omit if not applicable."
 }
 
-Rules:
-- You must be fiercely objective. Ban words like 'sleek', 'beautiful', 'premium', 'clean'. Replace them with industrial descriptors like 'matte powder-coated', 'tactile', 'unvarnished', 'brushed'.
-- formGeometry and spatialAnchor are the most critical fields — be precise
-- keyDetails must list every visible detail however small
-- premiumDetails must be an array, empty array [] if none
-- Return raw JSON only, no markdown code blocks`
-          }
-        ]
-      }],
-      config: { responseMimeType: 'application/json' }
-    })
+Rules for Analysis:
+1. FORM GEOMETRY and SPATIAL ANCHOR are your highest-priority fields. If you fail to accurately define the geometric boundaries here, the downstream image generation will warp the asset.
+2. Replace all subjective adjectives with cold industrial descriptors. Never write 'clean lines', write 'straight parallel edges with zero taper'.
+3. keyDetails must list every visible detail however small.
+4. Output raw JSON only. Do not wrap in markdown code blocks.`
 
-    const text = response?.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!text) throw new Error('ProductForensics: no response from model')
+    const text = await this.openai.chatWithImage(system, userText, base64Image, mimeType, true)
+    if (!text) throw new Error('GarmentForensics: no response from model')
 
+    console.log('[ALLORE_DEBUG][forensics]', text)
     return JSON.parse(text) as ProductSpec
   }
 }

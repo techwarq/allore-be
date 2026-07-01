@@ -30,6 +30,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -48,7 +49,7 @@ MACRO_PAD_FRAC       = 0.04   # 4% padding added around the macro bbox
 # DETECTION
 # ──────────────────────────────────────────────────────────────────────────────
 
-def detect_garment_bbox(image: Image.Image, use_yolo: bool) -> tuple[int, int, int, int]:
+def detect_garment_bbox(image: Image.Image, use_yolo: bool) -> Tuple[int, int, int, int]:
     """
     Returns (x1, y1, x2, y2) bounding box of the garment subject.
     Falls back gracefully at each level:
@@ -65,7 +66,7 @@ def detect_garment_bbox(image: Image.Image, use_yolo: bool) -> tuple[int, int, i
     return _smart_crop_fallback(image)
 
 
-def _yolo_detect(image: Image.Image) -> tuple[int, int, int, int] | None:
+def _yolo_detect(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
     try:
         from ultralytics import YOLO
     except ImportError:
@@ -84,7 +85,7 @@ def _yolo_detect(image: Image.Image) -> tuple[int, int, int, int] | None:
     return int(x1), int(y1), int(x2), int(y2)
 
 
-def _smart_crop_fallback(image: Image.Image) -> tuple[int, int, int, int]:
+def _smart_crop_fallback(image: Image.Image) -> Tuple[int, int, int, int]:
     """
     For flat-lays, product-on-white, or images where no person is detected.
     Strips the outer 8% of the frame (usually dead background) to focus on subject.
@@ -99,7 +100,7 @@ def _smart_crop_fallback(image: Image.Image) -> tuple[int, int, int, int]:
 # ZONE COMPUTATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-def compute_zones(macro_bbox: tuple[int, int, int, int]) -> dict[str, tuple[int, int, int, int]]:
+def compute_zones(macro_bbox: Tuple[int, int, int, int]) -> dict:
     """
     Given the macro bounding box, return sub-crop bboxes for each zone.
     All zones are computed as offsets within the macro bbox.
@@ -126,10 +127,10 @@ def compute_zones(macro_bbox: tuple[int, int, int, int]) -> dict[str, tuple[int,
 
 
 def pad_bbox(
-    bbox: tuple[int, int, int, int],
-    image_wh: tuple[int, int],
+    bbox: Tuple[int, int, int, int],
+    image_wh: Tuple[int, int],
     pad_frac: float = MACRO_PAD_FRAC
-) -> tuple[int, int, int, int]:
+) -> Tuple[int, int, int, int]:
     x1, y1, x2, y2 = bbox
     W, H = image_wh
     px = int((x2 - x1) * pad_frac)
@@ -143,9 +144,9 @@ def pad_bbox(
 
 def crop_and_resize(
     image: Image.Image,
-    bbox: tuple[int, int, int, int],
+    bbox: Tuple[int, int, int, int],
     target_px: int,
-    bg_color: tuple[int, int, int] = (255, 255, 255)
+    bg_color: Tuple[int, int, int] = (255, 255, 255)
 ) -> Image.Image:
     """
     Crop to bbox, maintain aspect ratio inside target_px × target_px square,
@@ -264,7 +265,7 @@ def cli_main():
 
 def server_main(host: str = "0.0.0.0", port: int = 8001):
     try:
-        from fastapi import FastAPI, File, UploadFile, HTTPException
+        from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
         from fastapi.responses import JSONResponse
         import uvicorn
     except ImportError:
@@ -276,7 +277,8 @@ def server_main(host: str = "0.0.0.0", port: int = 8001):
     @app.post("/preprocess")
     async def preprocess_endpoint(
         file: UploadFile = File(...),
-        use_yolo: bool = True
+        use_yolo: bool = True,
+        debug: bool = True,
     ):
         if not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="File must be an image")
@@ -285,8 +287,118 @@ def server_main(host: str = "0.0.0.0", port: int = 8001):
             image_bytes = await file.read()
             image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
             crops = preprocess(image, use_yolo=use_yolo)
+
+            if debug:
+                debug_dir = "/tmp/zone-crops"
+                os.makedirs(debug_dir, exist_ok=True)
+                for zone_name, zone_img in crops.items():
+                    path = os.path.join(debug_dir, f"{zone_name}.jpg")
+                    zone_img.save(path, "JPEG", quality=92)
+                    print(f"[debug] saved {zone_name} → {path}", file=sys.stderr)
+
             return JSONResponse(images_to_b64(crops))
 
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/preprocess-custom")
+    async def preprocess_custom_endpoint(
+        file: UploadFile = File(...),
+        instructions: str = Form(...),   # JSON array of CropInstruction
+    ):
+        """
+        LLM-driven crop extraction.
+        Each instruction specifies a named region as fractional bbox or "full".
+        Returns { crop_name: { data, mimeType, size } }
+        """
+        if not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        # Expand each LLM-specified bbox by this fraction on each side.
+        # Compensates for imprecise LLM coordinate estimates — especially
+        # for corner/edge details where being slightly off misses the feature.
+        BBOX_PAD_FRAC = 0.08
+
+        try:
+            image_bytes = await file.read()
+            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+            W, H = image.size
+
+            crop_instructions = json.loads(instructions)
+            results = {}
+
+            for instr in crop_instructions:
+                name        = instr.get("name", "crop")
+                region      = instr.get("region", "full")
+                output_size = int(instr.get("outputSize", 512))
+
+                if region == "full":
+                    bbox = _smart_crop_fallback(image)
+                else:
+                    # Fractional bbox → pixel coordinates
+                    top    = float(region.get("top",    0.0))
+                    left   = float(region.get("left",   0.0))
+                    width  = float(region.get("width",  1.0))
+                    height = float(region.get("height", 1.0))
+
+                    x1 = int(left          * W)
+                    y1 = int(top           * H)
+                    x2 = int((left + width) * W)
+                    y2 = int((top + height) * H)
+
+                    # Expand bbox by BBOX_PAD_FRAC on each side to catch
+                    # features that the LLM placed slightly off-centre
+                    pad_x = int((x2 - x1) * BBOX_PAD_FRAC)
+                    pad_y = int((y2 - y1) * BBOX_PAD_FRAC)
+                    x1 = max(0, x1 - pad_x)
+                    y1 = max(0, y1 - pad_y)
+                    x2 = min(W, x2 + pad_x)
+                    y2 = min(H, y2 + pad_y)
+
+                    # Guard degenerate boxes
+                    if x2 <= x1 or y2 <= y1:
+                        bbox = _smart_crop_fallback(image)
+                    else:
+                        bbox = (x1, y1, x2, y2)
+
+                cropped = crop_and_resize(image, bbox, output_size)
+                buf = io.BytesIO()
+                cropped.save(buf, format="JPEG", quality=92)
+                results[name] = {
+                    "data": base64.b64encode(buf.getvalue()).decode("utf-8"),
+                    "mimeType": "image/jpeg",
+                    "size": output_size,
+                }
+
+                print(f"[preprocess-custom] {name} → bbox={bbox} size={output_size}px", file=sys.stderr)
+
+                # Save to disk for debugging
+                debug_dir = "/tmp/zone-crops"
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, f"{name}.jpg")
+                cropped.save(debug_path, "JPEG", quality=92)
+                print(f"[debug] saved {name} → {debug_path}", file=sys.stderr)
+
+            return JSONResponse(results)
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/debug/save")
+    async def debug_save(request: Request):
+        try:
+            data = await request.json()
+            run_id = data.get("runId", "unknown")
+            timestamp = data.get("timestamp", "").replace(":", "-").replace(".", "-")
+            filename = f"{timestamp}-{run_id}.json"
+            # Save to debug-runs/ in the project root (one level up from python/)
+            debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug-runs")
+            os.makedirs(debug_dir, exist_ok=True)
+            filepath = os.path.join(debug_dir, filename)
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"[debug] run saved → {filepath}", file=sys.stderr)
+            return JSONResponse({"saved": filename})
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
