@@ -5,8 +5,9 @@ import { AssetUploadService } from '../services/assetUpload.service';
 import { BulkIngestService } from '../services/bulkIngest.service';
 import { AssetSearchService } from '../services/assetSearch.service';
 import { ChatRepository } from '../db/ChatRepository';
-import { inArray, eq, and, desc } from 'drizzle-orm';
+import { inArray, eq, and, desc, isNotNull } from 'drizzle-orm';
 import { privateAssets, assets as userAssets } from '../db/schema';
+import { getSignedR2Url } from '../lib/r2';
 
 type Bindings = {
   DATABASE_URL: string;
@@ -168,6 +169,39 @@ assets.get('/flush-r2', async (c) => {
 
 // Protect all following routes
 assets.use('*', sessionMiddleware);
+
+/**
+ * GET /assets/avatars
+ * Lists the current user's saved (approved + named) AI model avatars — the same
+ * set SimpleShootPlannerTool's avatar_reuse gate resolves "@Name" mentions
+ * against. Powers the frontend's "@" avatar picker in the chat input.
+ */
+assets.get('/avatars', async (c) => {
+  const user = c.get('user');
+  const db = getDb(c.env.DATABASE_URL);
+
+  const rows = await db
+    .select()
+    .from(privateAssets)
+    .where(and(
+      eq(privateAssets.userId, user.id),
+      eq(privateAssets.type, 'avatar'),
+      isNotNull(privateAssets.label),
+    ))
+    .orderBy(desc(privateAssets.createdAt));
+
+  const avatars = await Promise.all(rows.map(async (r) => {
+    let url: string;
+    try {
+      url = await getSignedR2Url(c.env.ASSETS_BUCKET as any, r.r2Key, 7200);
+    } catch {
+      url = `${c.env.API_URL || ''}/assets/download?key=${encodeURIComponent(r.r2Key)}`;
+    }
+    return { id: r.id, name: r.label as string, url };
+  }));
+
+  return c.json({ avatars });
+});
 
 /**
  * POST /assets/upload

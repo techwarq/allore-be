@@ -14,6 +14,7 @@ export class PinterestBrowserService {
   private browserbaseApiKey: string;
   private vertexProjectId: string;
   private vertexLocation: string;
+  private projectId: string;
   private stagehandEnv: "BROWSERBASE" | "LOCAL";
   private email?: string;
   private password?: string;
@@ -28,6 +29,7 @@ export class PinterestBrowserService {
     vertexLocation: string,
     browserbaseProjectId: string = "default",
     stagehandEnv: "BROWSERBASE" | "LOCAL" = "BROWSERBASE",
+    email?: string,
     password?: string,
     cookieString?: string,
     serviceAccountEmail?: string,

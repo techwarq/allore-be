@@ -1,15 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
-import { IntentEngine, IntentPlan } from "../services/chat/IntentEngine";
-import { ChatEvent, Task, ToolResponse, SessionMemory } from "../types/chat";
-import { ToolContext } from "../services/chat/tools/Tool";
-import { getDb } from "../db";
-import { privateAssets, assets as userAssets, chatMessages } from "../db/schema";
+import { PlannerIntentAgent, IntentPlan } from "../agents/PlannerIntentAgent";
+import { ChatEvent, Task, ToolResponse, SessionMemory } from "../../types/chat";
+import { ToolContext } from "../../services/chat/tools/Tool";
+import { getDb } from "../../db";
+import { privateAssets, assets as userAssets, chatMessages } from "../../db/schema";
 import { inArray, eq, asc } from "drizzle-orm";
-import { TextService } from "../services/gemini/TextService";
-import { getStandardToolCatalog } from "../services/chat/StandardTools";
-import { CreativeStudioTool } from "../services/chat/tools/CreativeStudioTool";
-import { StorytellerTool } from "../services/chat/tools/StorytellerTool";
-import { AvatarGeneratorTool } from "../services/chat/tools/AvatarGeneratorTool";
+import { TextService } from "../../services/gemini/TextService";
+import { getStandardToolCatalog } from "../../services/chat/StandardTools";
+import { CreativeStudioTool } from "../../services/chat/tools/CreativeStudioTool";
+import { StorytellerTool } from "../../services/chat/tools/StorytellerTool";
+import { AvatarGeneratorTool } from "../../services/chat/tools/AvatarGeneratorTool";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function isObject(item: any) {
@@ -32,7 +32,7 @@ function deepMerge(target: any, source: any): any {
   return output;
 }
 
-export interface ResponserEnv {
+export interface OrchestratorEnv {
   GEMINI_API_KEY: string;
   VERTEX_PROJECT_ID: string;
   VERTEX_LOCATION: string;
@@ -41,19 +41,21 @@ export interface ResponserEnv {
   DATABASE_URL: string;
   API_URL: string;
   OPENAI_API_KEY: string;
+  OPENROUTER_API_KEY?: string;
+  FAL_KEY?: string;
+  QDRANT_URL: string;
+  QDRANT_API_KEY: string;
   LLM_QUEUE: Queue;
   IMAGE_QUEUE: Queue;
   VIDEO_QUEUE: Queue;
   ASSETS_BUCKET: R2Bucket;
-  PINTEREST_COOKIE?: string;
-  BROWSERBASE_API_KEY?: string;
-  BROWSERBASE_PROJECT_ID?: string;
-  STAGEHAND_ENV?: "BROWSERBASE" | "LOCAL";
-  PINTEREST_EMAIL?: string;
-  PINTEREST_PASSWORD?: string;
+  // Credit-saving switches — "false" stops generation short of the actual image
+  // API call and streams the prompt(s) back for review instead.
+  IMAGE_GEN_ENABLED?: string;
+  PHOTOSHOOT_IMAGE_GEN_ENABLED?: string;
 }
 
-export class Responser extends DurableObject<ResponserEnv> {
+export class Orchestrator extends DurableObject<OrchestratorEnv> {
 
   // ── In-memory state (rebuilt from storage after hibernation) ──────────────
   private initialized = false;
@@ -81,7 +83,7 @@ export class Responser extends DurableObject<ResponserEnv> {
   // ── Shared services (built once, reused across tools) ─────────────────────
   private textService!: TextService;
 
-  constructor(state: DurableObjectState, env: ResponserEnv) {
+  constructor(state: DurableObjectState, env: OrchestratorEnv) {
     super(state, env);
   }
 
@@ -192,9 +194,11 @@ export class Responser extends DurableObject<ResponserEnv> {
     const { readable, writable } = new TransformStream();
     this.writer = writable.getWriter();
 
-    // Heartbeat — keeps SSE alive through Cloudflare's idle timeout
+    // Heartbeat — keeps SSE alive through Cloudflare's idle timeout.
+    // Uses its own event type (not "chat_text") so the client doesn't mistake
+    // it for a real status update and blank out whatever status was showing.
     this.heartbeatInterval = setInterval(() => {
-      this.sendEvent({ type: "chat_text", status: " " }).catch(() => {
+      this.sendEvent({ type: "heartbeat" }).catch(() => {
         clearInterval(this.heartbeatInterval);
         this.heartbeatInterval = null;
         // Client disconnected — release the lock so the next request isn't blocked
@@ -204,18 +208,25 @@ export class Responser extends DurableObject<ResponserEnv> {
 
     // Safety net for hung sync tools. Async tools release the lock proactively
     // (via cleanup() in runNextStep) before this ever fires.
-    this.lockTimeout = setTimeout(async () => {
-      if (this.isLocked) {
-        console.error('[Responser] Lock timeout — forcing cleanup after 90s');
-        await this.sendEvent({ type: 'error', message: 'Request timed out' });
-        await this.cleanup();
-      }
-    }, 90_000);
+    this.armLockTimeout();
 
     // All orchestration runs in waitUntil — non-blocking
     this.ctx.waitUntil(this.orchestrate(message, attachments));
 
     return readable;
+  }
+
+  /**
+   * Dev/debug escape hatch — clears the shoot-flow flags directly, for sessions
+   * that got stuck stranded before the reset-on-completion fix existed (or any
+   * future case where a job never calls back). Not part of the normal request path.
+   */
+  async resetShootState(): Promise<void> {
+    await this.ensureHydrated();
+    this.memory = deepMerge(this.memory, {
+      campaign: { ...this.memory.campaign, shootEngineQueued: false, shootConfirmed: false },
+    });
+    await this.persist();
   }
 
   /**
@@ -245,7 +256,7 @@ export class Responser extends DurableObject<ResponserEnv> {
 
       if (remaining <= 0) {
         await this.ctx.storage.put(`job:${jobId}:status`, "done");
-        console.log(`[Responser] Async job ${jobId} complete — ${existing.length + (result.visible?.length ?? 0)} events stored`);
+        console.log(`[Orchestrator] Async job ${jobId} complete — ${existing.length + (result.visible?.length ?? 0)} events stored`);
       }
 
       await this.persist();
@@ -271,22 +282,19 @@ export class Responser extends DurableObject<ResponserEnv> {
     await this.persist();
 
     if (result.pauseForUserInput) {
-      // choice_questionnaire is what every real gate (SimpleShootPlannerTool,
-      // AvatarGeneratorTool) actually emits, and per its own type comment it's
-      // "the only variant the frontend's SSE parser actually renders as a
-      // clickable question" — chat_text.questionnaire (CreativeStudioTool's
-      // legacy shape) falls through unrendered on the frontend. This used to
-      // only check the legacy shape, so pendingQuestion was never set for any
-      // of the real gates — extractAnswer() never ran on the next turn, and
-      // the user's click/reply got fed straight into a fresh intent-analysis
-      // pass instead of resolving the question that was actually asked.
       const q = result.visible?.find(
         (e: any) => e.type === "choice_questionnaire" || (e.type === "chat_text" && e.questionnaire)
       ) as any;
-
       const questionId = q?.type === "choice_questionnaire" ? q.questionId : q?.questionnaire?.questionId;
+      const rawOptions = q?.type === "choice_questionnaire" ? q.content?.options : q?.questionnaire?.options;
+
       if (questionId) {
-        this.memory.flowControl.pendingQuestion = { id: questionId };
+        this.memory.flowControl.pendingQuestion = {
+          id: questionId,
+          options: Array.isArray(rawOptions)
+            ? rawOptions.map((o: any) => ({ id: o.id, label: o.label }))
+            : [],
+        };
         await this.persist();
       }
 
@@ -378,11 +386,27 @@ export class Responser extends DurableObject<ResponserEnv> {
       // Phase 1: Resume if we were waiting for a user answer
       const pending = this.memory.flowControl.pendingQuestion;
       if (pending) {
-        await this.extractAnswer(message);
+        if (this.answerMatchesPending(message, attachments, pending)) {
+          await this.extractAnswer(message);
 
-        if (this.memory.flowControl.pendingTasks.length > 0) {
-          await this.runNextStep();
-          return;
+          if (this.memory.flowControl.pendingTasks.length > 0) {
+            await this.runNextStep();
+            return;
+          }
+        } else {
+          // Doesn't answer the pending question — don't force a low-confidence
+          // extraction into memory (e.g. avatar_approval hijacking an unrelated
+          // new message + attachment). Abandon the question AND its queued
+          // deterministic resume (avatar_finalize / resume_shoot_planner) —
+          // resuming a workflow the user has moved past would still be wrong —
+          // and fall through to Phase 2 so IntentEngine sees the real message.
+          // Deliberately skip extractAnswer(): its underlying state (useAvatar,
+          // avatarPrefs, etc.) stays untouched, so the gate just asks again
+          // naturally if reached later.
+          console.warn(`[Orchestrator] Message did not match pending question "${pending.id}" — abandoning it.`);
+          this.memory.flowControl.pendingQuestion = null;
+          this.memory.flowControl.pendingTasks = [];
+          await this.persist();
         }
       }
 
@@ -390,9 +414,9 @@ export class Responser extends DurableObject<ResponserEnv> {
       await this.sendEvent({ type: "chat_text", status: "Analyzing your request..." });
 
       const catalog = getStandardToolCatalog(this.env as any, this.textService);
-      const intentEngine = new IntentEngine(this.textService, catalog);
+      const plannerAgent = new PlannerIntentAgent(this.textService, catalog);
 
-      const plan: IntentPlan = await intentEngine.analyze(message, {
+      const plan: IntentPlan = await plannerAgent.analyze(message, {
         brandContext: this.brandContext,
         memory: this.memory,
         attachments,
@@ -426,10 +450,36 @@ export class Responser extends DurableObject<ResponserEnv> {
       await this.runNextStep();
 
     } catch (err: any) {
-      console.error("[Responser] Orchestration error:", err);
+      console.error("[Orchestrator] Orchestration error:", err);
       await this.sendEvent({ type: "error", message: err.message });
       await this.cleanup();
     }
+  }
+
+  /**
+   * (Re-)arms the hung-tool safety net. Called once when a turn starts and
+   * again at the top of every runNextStep() — each sync tool step gets its
+   * own fresh 90s window rather than sharing one budget across a whole
+   * multi-step chain. A rich request (storyteller -> creative_studio ->
+   * avatar_generator -> image generation) can legitimately take a few
+   * minutes combined without any single step actually hanging; this only
+   * needs to catch a step that's individually stuck.
+   */
+  // 3 minutes — generous enough to cover a slow step that's legitimately retrying
+  // (e.g. TextService.generate()'s own internal retries on a sluggish image-gen
+  // call can take up to ~3 min worst case: 3 attempts x 60s + backoff) without
+  // being so long that a truly hung step leaves the user waiting forever.
+  private static readonly STEP_TIMEOUT_MS = 180_000;
+
+  private armLockTimeout(): void {
+    if (this.lockTimeout) clearTimeout(this.lockTimeout);
+    this.lockTimeout = setTimeout(async () => {
+      if (this.isLocked) {
+        console.error(`[Orchestrator] Lock timeout — forcing cleanup after ${Orchestrator.STEP_TIMEOUT_MS / 1000}s on one step`);
+        await this.sendEvent({ type: 'error', message: 'Request timed out' });
+        await this.cleanup();
+      }
+    }, Orchestrator.STEP_TIMEOUT_MS);
   }
 
   private async runNextStep(): Promise<void> {
@@ -445,15 +495,23 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
+    this.armLockTimeout();
+
     const task = this.memory.flowControl.pendingTasks.shift()!;
     const ctx = this.buildToolContext();
+
+    // Structured tools (generate_text, generate_image, search) are meant to be
+    // called with explicit input from the plan/chain; fall back to the turn's
+    // raw input only when nothing more specific was provided.
+    const resolveInput = () =>
+      task.input && Object.keys(task.input).length > 0 ? task.input : this.currentInput;
 
     // ── Sync fast-path tools ───────────────────────────────────────────────
     // These run directly inside the DO — no queue needed
     const syncTools: Record<string, () => Promise<ToolResponse>> = {
       memory_recall: async () => {
-        const { MemoryRecallTool } = await import("../services/chat/tools/MemoryRecallTool");
-        return new MemoryRecallTool(this.env as any)
+        const { MemoryTool } = await import("../tools/memory");
+        return new MemoryTool(this.env as any)
           .run({ query: task.input?.query ?? this.currentInput?.message ?? "" }, ctx);
       },
       creative_studio: async () => {
@@ -471,15 +529,22 @@ export class Responser extends DurableObject<ResponserEnv> {
         return new AvatarGeneratorTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
       },
+      generate_text: async () => {
+        const { GenerateTextTool } = await import("../tools/generateText");
+        return new GenerateTextTool().run(resolveInput(), ctx);
+      },
+      generate_image: async () => {
+        await this.sendEvent({ type: "chat_text", status: "Generating image..." });
+        const { GenerateImageTool } = await import("../tools/generateImage");
+        return new GenerateImageTool(this.env as any).run(resolveInput(), ctx);
+      },
+      search: async () => {
+        const { SearchTool } = await import("../tools/search");
+        return new SearchTool(this.env as any).run(resolveInput(), ctx);
+      },
       shoot_engine_planner: async () => {
         await this.sendEvent({ type: "chat_text", status: "Preparing campaign shoot plan..." });
-        // PhotoshootAgent -> SimpleShootPlannerTool is the live implementation now —
-        // it has the asset picker, shoot-brief/vibe, avatar-reuse-by-name, and
-        // shot-count-confirm gates that the tool catalog already advertises to the
-        // intent engine. The old ShootEngineTool (kept for reference only) doesn't
-        // have any of those and was silently running instead of what was actually
-        // described/planned for — do not revert to it.
-        const { PhotoshootAgent } = await import("../core/agents/PhotoshootAgent");
+        const { PhotoshootAgent } = await import("../agents/PhotoshootAgent");
         return new PhotoshootAgent(this.env as any).run(this.currentInput, ctx);
       },
     };
@@ -490,14 +555,11 @@ export class Responser extends DurableObject<ResponserEnv> {
       return;
     }
 
-    // ── ShootEngine — queued, but SSE stays open ─────────────────────────────
+    // ── ShootEngine / SimpleShootEngine — queued, but SSE stays open ─────────
     // Queue does the heavy lifting (retries, rate limiting).
     // appendJobEvents RPC forwards each shot back through this writer in real-time.
-    // Client sees a single stream — no polling needed.
-    // simple_shoot_engine (SimpleShootEngine, queued by PhotoshootAgent/
-    // SimpleShootPlannerTool) takes the same real-time carve-out — its queue
-    // consumer already forwards through the identical appendJobEvents RPC
-    // (index.ts), it just has a different source event shape to translate.
+    // Client sees a single stream — no polling needed. Which engine actually runs
+    // is decided by the queue worker's switch on task.tool (index.ts).
     if (task.tool === 'shoot_engine' || task.tool === 'simple_shoot_engine') {
       // Clear 90s timeout — shoot gen takes several minutes
       if (this.lockTimeout) {
@@ -610,7 +672,7 @@ export class Responser extends DurableObject<ResponserEnv> {
           content: m.content,
         }));
         console.log(
-          `[Responser] Loaded ${messages.length} prior messages for project ${projectId}`
+          `[Orchestrator] Loaded ${messages.length} prior messages for project ${projectId}`
         );
       }
 
@@ -629,12 +691,12 @@ export class Responser extends DurableObject<ResponserEnv> {
           existingAssets.map((a) => a.id)
         );
         console.log(
-          `[Responser] Pre-loaded product from ${existingAssets.length} project assets`
+          `[Orchestrator] Pre-loaded product from ${existingAssets.length} project assets`
         );
       }
     } catch (err) {
       // Non-fatal — session still works without prior history
-      console.error("[Responser] Failed to load project history:", err);
+      console.error("[Orchestrator] Failed to load project history:", err);
     }
   }
 
@@ -661,7 +723,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       });
     } catch (err) {
       // Non-fatal — in-memory history still works even if DB write fails
-      console.error("[Responser] Failed to save message to DB:", err);
+      console.error("[Orchestrator] Failed to save message to DB:", err);
     }
   }
 
@@ -712,36 +774,63 @@ export class Responser extends DurableObject<ResponserEnv> {
   // ═══════════════════════════════════════════════════════════════════════════
 
   private async resolveAttachments(attachments: any[]): Promise<void> {
-    if (this.memory.product?.productLocked) return;
-
     const db = getDb(this.env.DATABASE_URL);
+    const thisTurnAssetIds = attachments.map((a) => a.assetId).filter(Boolean);
 
-    // Priority 1: this turn's attachments
-    const assetIds = attachments.map((a) => a.assetId).filter(Boolean);
-    if (assetIds.length) {
+    const alreadyLocked = this.memory.product?.productLocked === true;
+    const lockedAssetIds = new Set(this.memory.product?.assetIds ?? []);
+    // A genuinely new attachment this turn — one whose assetId isn't already
+    // part of the locked product. Re-sending the same asset, or no attachment
+    // at all, must NOT re-trigger resolution (unchanged single-lock behavior).
+    const hasNewThisTurnAsset = thisTurnAssetIds.some((id) => !lockedAssetIds.has(id));
+
+    if (alreadyLocked && !hasNewThisTurnAsset) return;
+
+    // Priority 1: this turn's attachments — runs even when already locked, IF
+    // there's a genuinely new asset id. Previously this whole method returned
+    // before ever reaching this block once locked, silently dropping any
+    // later upload the user explicitly attached ("use this instead").
+    if (thisTurnAssetIds.length) {
+      const previousAssetIds = [...lockedAssetIds];
+
       const userResults = await db
         .select()
         .from(userAssets)
-        .where(inArray(userAssets.id, assetIds));
+        .where(inArray(userAssets.id, thisTurnAssetIds));
 
       if (userResults.length) {
         await this.lockProductFromAssets(
           userResults.map((a) => ({ ...a, r2Key: a.url })),
-          assetIds
+          thisTurnAssetIds
         );
+        this.maybeResetShootGatesOnProductChange(previousAssetIds);
         return;
       }
 
       const privateResults = await db
         .select()
         .from(privateAssets)
-        .where(inArray(privateAssets.id, assetIds));
+        .where(inArray(privateAssets.id, thisTurnAssetIds));
 
       if (privateResults.length) {
-        await this.lockProductFromAssets(privateResults, assetIds);
+        await this.lockProductFromAssets(privateResults, thisTurnAssetIds);
+        this.maybeResetShootGatesOnProductChange(previousAssetIds);
         return;
       }
+
+      if (alreadyLocked) {
+        // New id(s) didn't resolve in either table (bad id, deleted row,
+        // etc.) — fall back to the existing locked product rather than
+        // error. Can't stream a warning from here — this runs in process()
+        // before the SSE writer exists.
+        console.warn("[Orchestrator] New attachment(s) did not resolve — keeping existing locked product:", thisTurnAssetIds);
+        return;
+      }
+      // Not locked yet — fall through to Priority 2/3 below (unchanged).
     }
+
+    if (alreadyLocked) return; // no resolvable new attachment — don't run the
+                                // first-lock-only fallbacks against a locked product
 
     // Priority 2: memory refs from prior turns
     const memoryRefs =
@@ -780,6 +869,22 @@ export class Responser extends DurableObject<ResponserEnv> {
         );
       }
     }
+  }
+
+  // When a genuinely new product asset replaces the locked one mid-session,
+  // the prior shoot confirmation (asset list + count) no longer reflects
+  // reality — reset the resettable per-shoot gate flags so
+  // SimpleShootPlannerTool's Gate 4 re-confirms with the new asset instead of
+  // silently reusing a stale confirmation. Does NOT touch
+  // avatarImages/avatarApproved — avatars are a reusable, user-level asset by
+  // design (see the avatar_reuse gate), not tied 1:1 to a single product.
+  private maybeResetShootGatesOnProductChange(previousAssetIds: string[]): void {
+    if (previousAssetIds.length === 0) return; // first-time lock, nothing to reset
+    this.memory.campaign = {
+      ...this.memory.campaign,
+      shootConfirmed: false,
+      shootEngineQueued: false,
+    };
   }
 
   private async lockProductFromAssets(
@@ -825,13 +930,28 @@ export class Responser extends DurableObject<ResponserEnv> {
 
     await this.persist();
     console.log(
-      `[Responser] Product locked: "${this.memory.product.name}" | key: ${this.memory.product.primaryAssetKey}`
+      `[Orchestrator] Product locked: "${this.memory.product.name}" | key: ${this.memory.product.primaryAssetKey}`
     );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ANSWER EXTRACTION
   // ═══════════════════════════════════════════════════════════════════════════
+
+  // True if `message`/`attachments` plausibly answers `pending`. False means:
+  // don't touch memory for this question — abandon it and treat the turn as a
+  // fresh request instead of forcing a low-confidence extraction.
+  private answerMatchesPending(
+    message: string,
+    attachments: any[],
+    pending: { id: string; options?: Array<{ id: string; label: string }> }
+  ): boolean {
+    if (pending.options === undefined) return true; // legacy session, old behavior
+    if (pending.options.length === 0) return attachments.length === 0; // free-text gate
+    const norm = (s: string) => (s ?? "").trim().toLowerCase();
+    const m = norm(message);
+    return pending.options.some((o) => norm(o.id) === m || norm(o.label) === m);
+  }
 
   private async extractAnswer(message: string): Promise<void> {
     const pending = this.memory.flowControl.pendingQuestion;
@@ -864,12 +984,6 @@ export class Responser extends DurableObject<ResponserEnv> {
       avatar_custom_desc: (v) => ({
         campaign: { ...this.memory.campaign, avatarCustomDesc: v },
       }),
-      // ── The following were missing entirely — SimpleShootPlannerTool's gates
-      // read these fields from memory, but with no extractor writing them the
-      // answer was silently swallowed (question marked "answered" so it never
-      // re-asked, yet the chosen value never landed anywhere). Ported from the
-      // equivalent (unwired) map in core/orchestrator/Orchestrator.ts, which had
-      // already been updated to match but was never the live path.
       asset_selection: (v) =>
         v === "__upload_new__"
           ? { product: { ...this.memory.product, source: "upload", productLocked: this.memory.product?.productLocked ?? false } }
@@ -919,26 +1033,6 @@ export class Responser extends DurableObject<ResponserEnv> {
             ...this.memory.campaign,
             shootConfirmed: true,
             shootCount: Number.isFinite(count) && count > 0 ? count : 1,
-          },
-        };
-      },
-      // Real Pinterest reference pick (SimpleShootPlannerTool's vibe-picker gate,
-      // product-only shoots). Candidates are stashed in memory at ask-time; resolve
-      // by id here and fold a short description into shootBrief so the Creative
-      // Director stage actually sees what vibe was chosen, not just an opaque id.
-      vibe_choice: (v) => {
-        if (v === "custom") {
-          return { campaign: { ...this.memory.campaign, vibeChoice: "custom", vibeCandidates: undefined } };
-        }
-        const candidates = this.memory.campaign?.vibeCandidates ?? [];
-        const matched = candidates.find((c: any) => c.id === v);
-        const briefAddition = matched?.description || matched?.title;
-        return {
-          campaign: {
-            ...this.memory.campaign,
-            vibeChoice: matched ?? v,
-            vibeCandidates: undefined,
-            shootBrief: [this.memory.campaign?.shootBrief, briefAddition].filter(Boolean).join(". ") || undefined,
           },
         };
       },
@@ -993,7 +1087,7 @@ export class Responser extends DurableObject<ResponserEnv> {
         this.encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
       );
     } catch {
-      console.error("[Responser] Stream write failed — client may have disconnected.");
+      console.error("[Orchestrator] Stream write failed — client may have disconnected.");
     }
   }
 

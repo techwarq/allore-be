@@ -4,7 +4,8 @@ import { TextService } from "../../gemini/TextService";
 
 export class CreativeStudioTool implements Tool {
   name = "creative_studio";
-  description = "Shaping brand direction, campaign thinking, and high-level creative planning.";
+  description =
+    "Turns an existing brand story into concrete campaign/marketing direction and strategic recommendations. Requires a locked product (asks for one if missing). Use for 'what should we do' strategy questions, not for inventing the story itself (that's storyteller) or for generating the actual assets.";
   private textService: TextService;
   private env: any;
 
@@ -35,9 +36,9 @@ export class CreativeStudioTool implements Tool {
       return {
         pauseForUserInput: true,
         visible: [{
-          type: "choice_questionnaire",
-          questionId: "product_source",
-          content: {
+          type: "chat_text",
+          questionnaire: {
+            questionId: "product_source",
             title: "Let's get your product",
             question: "I couldn't find a product in your project. How would you like to add it?",
             options: [
@@ -81,8 +82,8 @@ You DO NOT generate final content. You ONLY:
 {
   "visible": [
     {
-      "type": "choice_questionnaire",
-      "content": {
+      "type": "chat_text",
+      "questionnaire": {
         "title": "...", "question": "...",
         "options": [{ "id": "...", "label": "...", "description": "..." }]
       }
@@ -96,7 +97,7 @@ You DO NOT generate final content. You ONLY:
 
 If clarity is sufficient, return a 'plan':
 {
-  "visible": [{ "type": "plan", "summary": "...", "steps": ["..."], "needsApproval": true }],
+  "visible": [{ "type": "chat_text", "plan": { "summary": "...", "steps": ["..."] } }],
   "hidden": { "executionPlan": [{ "tool": "..." }] }
 }
 
@@ -139,13 +140,13 @@ Return ONLY JSON.
         memoryUpdate,
         hidden: {
           projectId: (ctx as any).projectId || ctx.brandContext?.id || ctx.memory?.projectId,
-          activePlan: parsedResponse.visible?.find((v: any) => v.type === 'plan') || null
+          activePlan: parsedResponse.visible?.find((v: any) => v.type === 'chat_text' && v.plan)?.plan || null
         }
       };
     } catch (e) {
       console.error("[CreativeStudioTool] Failed to parse JSON:", responseText, e);
       return {
-        visible: [{ type: "text", content: "I'm having trouble formulating a plan. Could you clarify your vision?" }]
+        visible: [{ type: "chat_text", ai: "I'm having trouble formulating a plan. Could you clarify your vision?" }]
       };
     }
   }

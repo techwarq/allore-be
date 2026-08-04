@@ -146,3 +146,14 @@ export type ShootEngineInput = {
   assetTags?: Record<string, AssetTag>  // assetId → tag (product + angle), replaces AI classification
   dryRun?: boolean  // if true, stop after prompt generation — no image calls
 }
+
+// Direct query + reference images → shots, no forensics/routing/multi-stage analysis.
+export type SimpleShootInput = {
+  query: string
+  assetIds: string[]
+  projectId: string
+  userId: string
+  count?: number  // number of shots to generate, default 1
+  modelR2Keys?: string[]  // approved avatar R2 keys — model reference images, not product assets
+  vibeImageUrl?: string  // real Pinterest reference the user picked (vibe-picker gate) — fed to the Creative Director as a mood reference, not a product/model image
+}

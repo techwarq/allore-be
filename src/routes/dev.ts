@@ -17,6 +17,7 @@ type Bindings = {
   VERTEX_SERVICE_ACCOUNT_EMAIL?: string
   VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY?: string
   API_URL?: string
+  RESPONSER: DurableObjectNamespace
 }
 
 const dev = new Hono<{ Bindings: Bindings }>()
@@ -42,6 +43,26 @@ async function getOrCreateDevContext(db: ReturnType<typeof getDb>): Promise<{ us
   const [newProject] = await db.insert(projects).values({ userId, title: 'Dev Project', type: 'shoots', status: 'active' }).returning()
   return { userId, projectId: newProject.id }
 }
+
+/**
+ * POST /dev/reset-shoot-state
+ * Auth-free debug utility — clears the shoot-flow flags (shootEngineQueued,
+ * shootConfirmed) for a given project+user's chat session. Escape hatch for
+ * sessions that got stuck before the reset-on-completion fix existed.
+ * Body: { projectId, userId, sessionId? }
+ */
+dev.post('/reset-shoot-state', async (c) => {
+  const body = await c.req.json()
+  const { projectId, userId, sessionId } = body
+  if (!projectId || !userId) {
+    return c.json({ error: 'projectId and userId are required' }, 400)
+  }
+  const sid = sessionId || `${projectId}-${userId}`
+  const id = c.env.RESPONSER.idFromName(sid)
+  const stub = c.env.RESPONSER.get(id) as any
+  await stub.resetShootState()
+  return c.json({ success: true, sessionId: sid })
+})
 
 /**
  * POST /dev/upload

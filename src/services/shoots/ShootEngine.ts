@@ -94,6 +94,13 @@ export interface ShootEnv {
   ASSETS_BUCKET: any
   PREPROCESSOR_URL?: string
   REMOVE_BG_API_KEY?: string
+  PINTEREST_COOKIE?: string
+  BROWSERBASE_API_KEY?: string
+  BROWSERBASE_PROJECT_ID?: string
+  STAGEHAND_ENV?: "BROWSERBASE" | "LOCAL"
+  PINTEREST_EMAIL?: string
+  PINTEREST_PASSWORD?: string
+  API_URL?: string
 }
 
 type StreamFn = (event: object) => Promise<void>

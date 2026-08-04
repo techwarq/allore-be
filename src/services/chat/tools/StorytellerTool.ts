@@ -10,10 +10,10 @@ import { inArray } from "drizzle-orm";
 // ─── Prompt builder — conditional on whether product is already locked ────────
 function buildSystemPrompt(productLocked: boolean): string {
   const questionnaireRule = productLocked
-    ? `CRITICAL: Do NOT include a choice_questionnaire in your output under any circumstance.
+    ? `CRITICAL: Do NOT include a questionnaire in your output under any circumstance.
 The product and brand context are already confirmed. Your only job is the narrative.
 Do NOT ask questions. Do NOT request more information.`
-    : `ONLY include a choice_questionnaire if product information is genuinely missing from the payload.
+    : `ONLY include a questionnaire if product information is genuinely missing from the payload.
 If product data is present, do not ask for it again.
 The questionnaire MUST follow the exact structure in the output format.`;
 
@@ -64,8 +64,11 @@ Always think in this order:
 
 ## Moodboard & Visual Match Rules (CRITICAL)
 
-- search_queries MUST be extremely specific to the brand DNA
-- If the brand is Urban/Gritty/Rave/Disruptive: include words like "dirty", "raw", "grainy", "high-flash", "motion-blur"
+- search_queries MUST be extremely specific to the brand DNA — derive the mood words from what THIS
+  brand/product/audience actually is, not from a default aesthetic. E.g. Urban/Gritty/Rave/Disruptive ->
+  "dirty", "raw", "grainy", "high-flash", "motion-blur"; but a soft/organic skincare brand -> "sun-warmed",
+  "airy", "linen", "diffused light"; a playful kids' brand -> "bright", "pastel", "soft-focus", "candid".
+  Do not default to dark/moody/gritty language when the brand doesn't call for it.
 - Always include the product type in search queries (e.g. "baggy hoodie streetwear", "serum bottle macro")
 
 ---
@@ -75,12 +78,12 @@ Always think in this order:
 {
   "visible": [
     {
-      "type": "canvas_story",
-      "content": "Full narrative story (emotional, cinematic, brand-defining)"
+      "type": "chat_text",
+      "ai": "Full narrative story (emotional, cinematic, brand-defining)"
     },
     {
-      "type": "canvas_info",
-      "data": {
+      "type": "chat_text",
+      "info": {
         "branding_strategy": {
           "positioning": "",
           "core_emotion": "",
@@ -136,7 +139,8 @@ Return ONLY the JSON above. No markdown. No preamble. No extra keys.
 
 export class StorytellerTool implements Tool {
   name = "storyteller";
-  description = "Building the brand's narrative, emotional core, and product essence.";
+  description =
+    "Establishes the brand's core narrative — emotional hook, positioning, and product essence — that every other creative tool builds on. Run this first for any new brand/campaign direction; skip it if a story already exists in memory unless the user explicitly wants to change direction.";
   private textService: TextService;
   private storytellingEngine: StorytellingEngineService;
   private assetSearchService: AssetSearchService;
@@ -259,12 +263,12 @@ export class StorytellerTool implements Tool {
     // This is the safety net — never let a hallucinated question reach the client.
     const visible = (parsed.visible || []).filter((v: any) =>
       productLocked
-        ? v.type !== 'choice_questionnaire' && v.type !== 'questionnaire'
+        ? !(v.type === 'chat_text' && v.questionnaire)
         : true  // not locked — allow questionnaires through (but gate above returns early anyway)
     );
 
     // ── Moodboard image fetch ─────────────────────────────────────────────
-    const searchQueries: string[] = parsed.visible?.[1]?.data?.moodboard?.search_queries || [];
+    const searchQueries: string[] = parsed.visible?.[1]?.info?.moodboard?.search_queries || [];
     let moodboardImages: string[] = [];
 
     if (searchQueries.length > 0) {
@@ -288,11 +292,13 @@ export class StorytellerTool implements Tool {
 
           if (moodboardImages.length > 0) {
             visible.push({
-              type: "canvas_moodboard",
-              data: {
-                images: moodboardImages,
-                notes: parsed.visible?.[1]?.data?.moodboard?.notes
-                  || "Visual references pulled from the brand database."
+              type: "chat_text",
+              info: {
+                moodboard: {
+                  images: moodboardImages,
+                  notes: parsed.visible?.[1]?.info?.moodboard?.notes
+                    || "Visual references pulled from the brand database."
+                }
               }
             });
           }
@@ -309,9 +315,9 @@ export class StorytellerTool implements Tool {
       // Single source of truth for memory updates — Responser.handleToolResult merges this
       memoryUpdate: {
         creative: {
-          story: parsed.visible?.[0]?.content || "",
-          style: parsed.visible?.[1]?.data?.style || {},
-          canvasInfo: parsed.visible?.[1]?.data || {},
+          story: parsed.visible?.[0]?.ai || "",
+          style: parsed.visible?.[1]?.info?.style || {},
+          canvasInfo: parsed.visible?.[1]?.info || {},
           moodboardImages,
         }
       },
@@ -321,9 +327,9 @@ export class StorytellerTool implements Tool {
       // nextInput feeds into PhotoshootPlanner and downstream tools
       nextInput: {
         ...input,
-        story: parsed.visible?.[0]?.content || "",
-        style: parsed.visible?.[1]?.data?.style || {},
-        executionBlueprint: parsed.visible?.[1]?.data?.execution_blueprint || {},
+        story: parsed.visible?.[0]?.ai || "",
+        style: parsed.visible?.[1]?.info?.style || {},
+        executionBlueprint: parsed.visible?.[1]?.info?.execution_blueprint || {},
         moodboardImages,
       }
     };

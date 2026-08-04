@@ -65,8 +65,8 @@ export class ShootEngineTool implements Tool {
     if (useAvatar && !hasAvatars) {
       return {
         visible: [{
-          type: "status",
-          content: "Let's create your AI models first — then we'll shoot with them."
+          type: "chat_text",
+          status: "Let's create your AI models first — then we'll shoot with them."
         }],
         // avatar_generator chains back to shoot_engine_planner when done.
         // Also queue a resume task so it recovers gracefully if avatar_generator pauses mid-flow.

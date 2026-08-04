@@ -119,7 +119,7 @@ export class PhotoshootGeneratorTool implements Tool {
             { type: "status", content: `Shot ready: "${shot.concept}"` },
             {
               type: "photoshoots",
-              items: [{ shotId: shot.id, url: signedUrl, concept: shot.concept }]
+              items: [{ shotIndex: shot.id, url: signedUrl, concept: shot.concept }]
             }
           ],
           hidden: {
