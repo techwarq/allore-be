@@ -3,6 +3,11 @@ import { ToolResponse } from "../../types/chat";
 import { ImageService } from "../../services/gemini/ImageService";
 import { convertGeminiImagesToStorage } from "../../services/image-storage.helper";
 import { getDb } from "../../db";
+// @ts-ignore — text module via wrangler rules
+import generateImageSkillRaw from "../skills/generate-image.md";
+import { parseSkill } from "../skills/loadSkill";
+
+const GENERATE_IMAGE_SKILL = parseSkill(generateImageSkillRaw);
 
 export interface GenerateImageInput {
   prompt: string;
@@ -31,7 +36,9 @@ export interface GenerateImageEnv {
 export class GenerateImageTool implements Tool {
   name = "generate_image";
   description =
-    "Generates one or more images from a text prompt and stores them, returning signed URLs. Use for standalone image needs — not for full campaign photoshoots (use shoot_engine_planner for that).";
+    "Generates one or more images from a text prompt and stores them, returning signed URLs.";
+  whenToUse = GENERATE_IMAGE_SKILL.whenToUse;
+  routingNotes = GENERATE_IMAGE_SKILL.routingNotes;
 
   private imageService: ImageService;
 

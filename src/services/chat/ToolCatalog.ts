@@ -15,7 +15,12 @@ export class ToolCatalog {
 
   describeForPrompt(): string {
     return this.registry.entries()
-      .map(([name, tool]) => `- ${name}: ${tool.description}`)
+      .map(([name, tool]) => {
+        let block = `- ${name}: ${tool.description}`;
+        if (tool.whenToUse) block += `\n  Use when: ${tool.whenToUse}`;
+        if (tool.routingNotes) block += `\n  Note: ${tool.routingNotes}`;
+        return block;
+      })
       .join("\n");
   }
 }

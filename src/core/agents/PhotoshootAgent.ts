@@ -3,6 +3,11 @@ import { ToolResponse } from "../../types/chat";
 import { SimpleShootPlannerTool } from "../../services/chat/tools/SimpleShootPlannerTool";
 import { ShootEngine, ShootEnv } from "../../services/shoots/ShootEngine";
 import { ShootEngineInput } from "../../types/shoots";
+// @ts-ignore — text module via wrangler rules
+import shootEnginePlannerSkillRaw from "../skills/shoot-engine-planner.md";
+import { parseSkill } from "../skills/loadSkill";
+
+const SHOOT_ENGINE_PLANNER_SKILL = parseSkill(shootEnginePlannerSkillRaw);
 
 type StreamFn = (event: object) => Promise<void>;
 
@@ -33,7 +38,9 @@ export interface PhotoshootAgentEnv extends ShootEnv {
 export class PhotoshootAgent implements Tool {
   name = "shoot_engine_planner";
   description =
-    "Plans and generates a product photoshoot: gates on product assets (offers existing project assets or upload), model preference (AI avatars or product-only), and — for product-only shoots — the creative brief, then generates the shots via a lightweight creative-direction + Seedream pipeline.";
+    "Plans and generates a product photoshoot: gates on product assets (offers existing project assets or upload), model preference (AI avatars or product-only), and the creative brief (mood/setting/vibe), then generates the shots via a lightweight creative-direction + Seedream pipeline.";
+  whenToUse = SHOOT_ENGINE_PLANNER_SKILL.whenToUse;
+  routingNotes = SHOOT_ENGINE_PLANNER_SKILL.routingNotes;
 
   private planner: SimpleShootPlannerTool;
 

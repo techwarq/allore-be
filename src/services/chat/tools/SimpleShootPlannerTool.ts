@@ -3,8 +3,12 @@ import { ToolResponse } from "../../../types/chat";
 import { getDb } from "../../../db";
 import { assets, privateAssets } from "../../../db/schema";
 import { eq, desc, inArray, and, isNotNull } from "drizzle-orm";
-import { getSignedR2Url } from "../../../lib/r2";
 import { fetchPinterestVibes, VibeOption } from "../../pinterest-vibe.service";
+// @ts-ignore — text module via wrangler rules
+import shootEnginePlannerSkillRaw from "../../../core/skills/shoot-engine-planner.md";
+import { parseSkill } from "../../../core/skills/loadSkill";
+
+const SHOOT_ENGINE_PLANNER_SKILL = parseSkill(shootEnginePlannerSkillRaw);
 
 const UPLOAD_NEW_OPTION_ID = "__upload_new__";
 
@@ -38,9 +42,10 @@ interface AssetOption {
  * queued task (SimpleShootEngine — creative direction + Seedream generation, no
  * forensics). Mirrors the old ShootEngineTool's gate shape (asset → avatar y/n →
  * avatar generation) but adds an explicit asset-picker gate instead of silently
- * auto-locking to whatever resolveAttachments() found, and a shoot-brief gate for
- * the product-only path (no avatar) so the user gets to steer the concept instead
- * of the creative-director stage improvising from a bare chat message alone.
+ * auto-locking to whatever resolveAttachments() found, and a shoot-brief gate
+ * (vibe picker + mood/setting question) that runs regardless of avatar choice,
+ * so the user gets to steer the concept instead of the creative-director stage
+ * improvising from a bare chat message alone.
  *
  * Registered as "shoot_engine_planner" (via PhotoshootAgent) — keep this identity;
  * it's hardcoded into the intent-classifier prompt and every nextTasks chain that
@@ -49,7 +54,9 @@ interface AssetOption {
 export class SimpleShootPlannerTool implements Tool {
   name = "shoot_engine_planner";
   description =
-    "Plans and triggers a product photoshoot: gates on product assets (offers existing project assets or upload), model preference (AI avatars or product-only), and — for product-only shoots — the creative brief, then generates the shots. Preferred tool for any photoshoot, lookbook, or campaign request.";
+    "Plans and triggers a product photoshoot: gates on product assets (offers existing project assets or upload), model preference (AI avatars or product-only), and the creative brief (mood/setting/vibe), then generates the shots.";
+  whenToUse = SHOOT_ENGINE_PLANNER_SKILL.whenToUse;
+  routingNotes = SHOOT_ENGINE_PLANNER_SKILL.routingNotes;
 
   constructor(private env: SimpleShootPlannerEnv) {}
 
@@ -92,7 +99,117 @@ export class SimpleShootPlannerTool implements Tool {
       return this.askForAssets(projectId, ctx);
     }
 
-    // ── Gate 1: avatar preference ─────────────────────────────────────────────
+    // ── Gate 1: shoot vibe/setting — runs BEFORE model casting, avatar or
+    // product-only alike. Deliberately ahead of avatar_choice: the setting the
+    // user picks here (Pinterest reference or text brief) is what the FINAL
+    // composite (model + product + setting) uses — casting a model first and
+    // asking about setting after made the model gate's own generation blind to
+    // what scene it'd actually end up in, so avatar_generator had to guess a
+    // background/lighting from the brand story instead. Settling the vibe here
+    // first also means avatar_generator can now render a neutral studio
+    // reference (see buildAvatarPrompt) instead of a scene-specific one.
+    {
+      // NOTE: deliberately NOT gating any of gates 3a/3b/3c on `answeredQuestions`
+      // (unlike the one-time gates above, e.g. avatar_choice). answeredQuestions is
+      // a lifetime log that never clears for the life of the session (see Gate 4's
+      // shootConfirmed comment) — brief/vibe are per-SHOOT, reset to undefined
+      // whenever a shoot job completes (see the memoryUpdate at job completion in
+      // Orchestrator/index.ts). Co-gating on the lifetime log meant that once a
+      // user answered these ONCE in a session, every subsequent shoot request —
+      // "give it a new setting", "make another one", etc. — silently skipped
+      // asking again and reused/ignored stale state instead of capturing what the
+      // user actually just asked for. The resettable value alone (vibeChoice,
+      // shootBriefChoice, shootBrief) is sufficient to prevent re-asking within
+      // the SAME shoot, since extractAnswer sets it the moment it's answered.
+      let vibeChoice = ctx.memory?.campaign?.vibeChoice;
+      const pinterestConfigured = !!(this.env.PINTEREST_COOKIE || this.env.BROWSERBASE_API_KEY);
+
+      // ── Gate 1a: vibe picker — real Pinterest reference images (not
+      // AI-generated, not the internal moodboard collection). Runs before the
+      // plain-text brief question so the user has something concrete to react
+      // to instead of writing a brief from a blank page. Any failure/empty
+      // result here just falls through to the text-only gate below — never
+      // blocks the shoot on Pinterest being reachable.
+      if (pinterestConfigured && vibeChoice === undefined) {
+        const query = this.buildVibeQuery(ctx, input);
+        let candidates: VibeOption[] = [];
+        try {
+          candidates = await fetchPinterestVibes(this.env, query, 4);
+        } catch (err: any) {
+          console.warn("[SimpleShootPlannerTool] Vibe search failed, falling back to text brief:", err.message);
+        }
+
+        if (candidates.length > 0) {
+          return {
+            pauseForUserInput: true,
+            memoryUpdate: { campaign: { ...ctx.memory?.campaign, vibeCandidates: candidates } },
+            visible: [
+              { type: "shoot_images", items: candidates.map((c) => ({ url: c.imageUrl, concept: c.title })) },
+              {
+                type: "choice_questionnaire",
+                questionId: "vibe_choice",
+                content: {
+                  title: "Pick a vibe",
+                  question: "Real references for this shoot — pick a direction, or describe your own.",
+                  options: [
+                    ...candidates.map((c) => ({ id: c.id, label: c.title, description: c.description?.slice(0, 120) })),
+                    { id: "custom", label: "None of these", description: "I'll describe the mood/setting myself." },
+                  ],
+                },
+              },
+            ],
+          };
+        }
+        // No usable results this turn — treat like the user picked "describe it
+        // myself" so we don't retry a live Pinterest fetch on every subsequent
+        // turn of this same shoot.
+        vibeChoice = "custom";
+      }
+
+      const shootBriefChoice = ctx.memory?.campaign?.shootBriefChoice;
+      // Vibe picker already resolved a real reference and folded it into
+      // shootBrief (Responser's vibe_choice extractor) — no need to also ask
+      // the ai_decide/custom question. Only "custom" (explicit or via a failed
+      // search) still needs the ai_decide-vs-custom fork.
+      const vibeResolved = vibeChoice !== undefined && vibeChoice !== "custom";
+
+      if (!vibeResolved && !shootBriefChoice) {
+        return {
+          pauseForUserInput: true,
+          memoryUpdate: vibeChoice === "custom" ? { campaign: { ...ctx.memory?.campaign, vibeChoice: "custom" } } : undefined,
+          visible: [{
+            type: "choice_questionnaire",
+            questionId: "shoot_brief_choice",
+            content: {
+              title: "Shoot direction",
+              question: "Any specific mood, setting, or style for this shoot?",
+              options: [
+                { id: "ai_decide", label: "Let AI decide", description: "Develop a creative concept from your brief and brand style." },
+                { id: "custom", label: "I'll describe it", description: "Tell me the mood, setting, or style you want." },
+              ],
+            },
+          }],
+        };
+      }
+
+      if (!vibeResolved && shootBriefChoice === "custom" && !ctx.memory?.campaign?.shootBrief) {
+        return {
+          pauseForUserInput: true,
+          visible: [{
+            type: "choice_questionnaire",
+            questionId: "shoot_brief_custom",
+            content: {
+              title: "Describe the shoot",
+              question: "What mood, setting, or style do you want for this shoot?",
+              options: [],
+            },
+          }],
+        };
+      }
+    }
+
+    // ── Gate 2: avatar preference — asked after the setting is locked in, not
+    // before ─────────────────────────────────────────────────────────────────
     const useAvatar = ctx.memory?.campaign?.useAvatar;
     const answeredAvatarChoice = answeredQuestions.includes("avatar_choice");
 
@@ -114,10 +231,27 @@ export class SimpleShootPlannerTool implements Tool {
       };
     }
 
-    // ── Gate 2: avatar requested but not yet generated → reuse saved, ask which,
-    // or generate a brand new one ───────────────────────────────────────────
+    // ── Gate 3: avatar requested but not yet generated → reuse saved, ask which,
+    // or generate a brand new one. avatar_generator now casts a neutral studio
+    // reference (see AvatarGeneratorTool.buildAvatarPrompt) rather than one
+    // baked into this shoot's scene — the scene/setting from Gate 1 above gets
+    // composited in at final generation instead, so the same cast model stays
+    // reusable across shoots with completely different settings. ─────────────
     const avatarImages: any[] = ctx.memory?.campaign?.avatarImages ?? [];
     if (useAvatar && avatarImages.length === 0) {
+      // User already explicitly said "create a new one" at the avatar_reuse picker
+      // (avatar_reuse extractor sets this) — go straight to generating instead of
+      // re-fetching saved avatars and re-asking the identical reuse-or-new question.
+      if (ctx.memory?.campaign?.avatarForShoot) {
+        return {
+          visible: [{ type: "status", content: "Casting a new AI model for this shoot." }],
+          nextTasks: [
+            { id: "gen_avatars", tool: "avatar_generator" as any, input: {} },
+            { id: "resume_shoot_planner", tool: "shoot_engine_planner" as any, input: {} },
+          ],
+        };
+      }
+
       // An "@Name" mention in the user's message resolves directly to a saved
       // avatar, skipping the picker entirely.
       const mention = (input.message || "").match(/@(\w+)/)?.[1]?.toLowerCase();
@@ -178,100 +312,6 @@ export class SimpleShootPlannerTool implements Tool {
           { id: "resume_shoot_planner", tool: "shoot_engine_planner" as any, input: {} },
         ],
       };
-    }
-
-    // ── Gate 3: shoot brief (product-only path only) ───────────────────────────
-    // Avatar shoots already carry plenty of direction from the avatar gates; a
-    // product-only shoot has nothing steering it yet beyond the raw chat message.
-    if (!useAvatar) {
-      const answeredVibeChoice = answeredQuestions.includes("vibe_choice");
-      let vibeChoice = ctx.memory?.campaign?.vibeChoice;
-      const pinterestConfigured = !!(this.env.PINTEREST_COOKIE || this.env.BROWSERBASE_API_KEY);
-
-      // ── Gate 3a: vibe picker — real Pinterest reference images (not
-      // AI-generated, not the internal moodboard collection). Runs before the
-      // plain-text brief question so the user has something concrete to react
-      // to instead of writing a brief from a blank page. Any failure/empty
-      // result here just falls through to the text-only gate below — never
-      // blocks the shoot on Pinterest being reachable.
-      if (pinterestConfigured && vibeChoice === undefined && !answeredVibeChoice) {
-        const query = this.buildVibeQuery(ctx, input);
-        let candidates: VibeOption[] = [];
-        try {
-          candidates = await fetchPinterestVibes(this.env, query, 4);
-        } catch (err: any) {
-          console.warn("[SimpleShootPlannerTool] Vibe search failed, falling back to text brief:", err.message);
-        }
-
-        if (candidates.length > 0) {
-          return {
-            pauseForUserInput: true,
-            memoryUpdate: { campaign: { ...ctx.memory?.campaign, vibeCandidates: candidates } },
-            visible: [
-              { type: "shoot_images", items: candidates.map((c) => ({ url: c.imageUrl, concept: c.title })) },
-              {
-                type: "choice_questionnaire",
-                questionId: "vibe_choice",
-                content: {
-                  title: "Pick a vibe",
-                  question: "Real references for this shoot — pick a direction, or describe your own.",
-                  options: [
-                    ...candidates.map((c) => ({ id: c.id, label: c.title, description: c.description?.slice(0, 120) })),
-                    { id: "custom", label: "None of these", description: "I'll describe the mood/setting myself." },
-                  ],
-                },
-              },
-            ],
-          };
-        }
-        // No usable results this turn — treat like the user picked "describe it
-        // myself" so we don't retry a live Pinterest fetch on every subsequent
-        // turn of this same shoot.
-        vibeChoice = "custom";
-      }
-
-      const shootBriefChoice = ctx.memory?.campaign?.shootBriefChoice;
-      const answeredBriefChoice = answeredQuestions.includes("shoot_brief_choice");
-      // Vibe picker already resolved a real reference and folded it into
-      // shootBrief (Responser's vibe_choice extractor) — no need to also ask
-      // the ai_decide/custom question. Only "custom" (explicit or via a failed
-      // search) still needs the ai_decide-vs-custom fork.
-      const vibeResolved = vibeChoice !== undefined && vibeChoice !== "custom";
-
-      if (!vibeResolved && !shootBriefChoice && !answeredBriefChoice) {
-        return {
-          pauseForUserInput: true,
-          memoryUpdate: vibeChoice === "custom" ? { campaign: { ...ctx.memory?.campaign, vibeChoice: "custom" } } : undefined,
-          visible: [{
-            type: "choice_questionnaire",
-            questionId: "shoot_brief_choice",
-            content: {
-              title: "Shoot direction",
-              question: "Any specific mood, setting, or style for this shoot?",
-              options: [
-                { id: "ai_decide", label: "Let AI decide", description: "Develop a creative concept from your brief and brand style." },
-                { id: "custom", label: "I'll describe it", description: "Tell me the mood, setting, or style you want." },
-              ],
-            },
-          }],
-        };
-      }
-
-      const answeredBriefCustom = answeredQuestions.includes("shoot_brief_custom");
-      if (!vibeResolved && shootBriefChoice === "custom" && !ctx.memory?.campaign?.shootBrief && !answeredBriefCustom) {
-        return {
-          pauseForUserInput: true,
-          visible: [{
-            type: "choice_questionnaire",
-            questionId: "shoot_brief_custom",
-            content: {
-              title: "Describe the shoot",
-              question: "What mood, setting, or style do you want for this shoot?",
-              options: [],
-            },
-          }],
-        };
-      }
     }
 
     // ── Asset verification: a memory reference isn't proof the R2 object still
@@ -363,11 +403,21 @@ export class SimpleShootPlannerTool implements Tool {
     };
   }
 
-  // Query for the vibe-picker's live Pinterest search — product name/tags and
-  // brand aesthetic first (stable signal), the user's own words last (often
-  // just "yes go ahead" by this point in the flow, so it's a weak signal but
-  // still worth including when there's something more specific in it).
+  // Query for the vibe-picker's live Pinterest search. When a story/creative
+  // direction already exists (StorytellerTool ran first), its background_queries
+  // (pure setting/atmosphere — "summer evening nyc rooftop", no product/garment
+  // terms) are what should drive this. Deliberately NOT search_queries — those
+  // are StorytellerTool's own internal moodboard-DB lookup field and always
+  // include the product type by design, which just re-searches the product
+  // itself instead of the shoot's background/setting. Only fall back to a
+  // product-description query when there's no story yet (shoot-only flow, no
+  // storyteller run this session).
   private buildVibeQuery(ctx: ToolContext, input: any): string {
+    const backgroundQueries: string[] = ctx.memory?.creative?.canvasInfo?.moodboard?.background_queries || [];
+    if (backgroundQueries.length > 0) {
+      return backgroundQueries.slice(0, 2).join(" ").trim();
+    }
+
     const parts = [
       ctx.memory?.product?.name,
       ctx.memory?.product?.tags?.join(" "),
@@ -391,18 +441,19 @@ export class SimpleShootPlannerTool implements Tool {
         isNotNull(privateAssets.label),
       )).orderBy(desc(privateAssets.createdAt));
 
-      return Promise.all(rows.map(async (r) => {
-        let signedUrl: string;
-        try {
-          signedUrl = await getSignedR2Url(this.env.ASSETS_BUCKET, r.r2Key, 7200);
-        } catch {
-          signedUrl = `${this.env.API_URL || ""}/assets/download?key=${encodeURIComponent(r.r2Key)}`;
-        }
-        return {
-          id: r.id,
-          name: r.label as string,
-          images: [{ angleId: (r.metadata as any)?.angleId || "front", r2Key: r.r2Key, signedUrl }],
-        };
+      // Permanent proxy URL, not a signed one — a 2-hour signed URL goes dead
+      // (broken image icon) the moment a user takes longer than that to answer
+      // the "which model?" picker, or if this list gets cached/reused anywhere
+      // client-side. Generation itself uses r2Key directly, not this URL — it's
+      // display-only, same fix as GET /assets/avatars.
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.label as string,
+        images: [{
+          angleId: (r.metadata as any)?.angleId || "front",
+          r2Key: r.r2Key,
+          signedUrl: `${this.env.API_URL || ""}/assets/download?key=${encodeURIComponent(r.r2Key)}`,
+        }],
       }));
     } catch (err) {
       console.warn("[SimpleShootPlannerTool] Failed to load saved avatars:", err);

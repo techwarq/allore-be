@@ -6,9 +6,14 @@ import { AssetSearchService } from "../../assetSearch.service";
 import { getDb } from "../../../db";
 import { privateAssets } from "../../../db/schema";
 import { inArray } from "drizzle-orm";
+// @ts-ignore — text module via wrangler rules
+import storytellerSkillRaw from "../../../core/skills/storyteller.md";
+import { parseSkill } from "../../../core/skills/loadSkill";
+
+const STORYTELLER_SKILL = parseSkill(storytellerSkillRaw);
 
 // ─── Prompt builder — conditional on whether product is already locked ────────
-function buildSystemPrompt(productLocked: boolean): string {
+function buildSystemPrompt(productLocked: boolean, hasUserBrief: boolean): string {
   const questionnaireRule = productLocked
     ? `CRITICAL: Do NOT include a questionnaire in your output under any circumstance.
 The product and brand context are already confirmed. Your only job is the narrative.
@@ -17,130 +22,26 @@ Do NOT ask questions. Do NOT request more information.`
 If product data is present, do not ask for it again.
 The questionnaire MUST follow the exact structure in the output format.`;
 
-  return `
-You are the Storytelling Engine of Allore AI.
+  const briefRule = hasUserBrief
+    ? `CRITICAL: The payload includes "userBrief" — the user's own words on tone, vibe, or references
+they want. Treat it as the primary creative direction, not a suggestion to riff past. Every
+section (story, style, moodboard) must visibly trace back to what they described.`
+    : `No brief was given — the user asked you to propose the direction. Derive it from THIS
+brand's specific product, industry, and audience. Do not default to a generic "gritty
+streetwear / neon underground / New Noise" aesthetic regardless of category — that same
+template showing up for every brand is a failure mode, not a style.`;
 
-Allore AI believes:
-→ People don't buy products, they buy stories
-→ Every brand must have a clear narrative, emotional hook, and visual world
-→ Outputs must feel like a real creative strategist, not generic AI
-
----
-
-## Your Role
-
-You are given:
-1. Brand context (tone, audience, positioning)
-2. Product information
-3. Retrieved storytelling patterns (from vector database)
-
-Your job is to:
-- Synthesize all inputs
-- Create ONE cohesive brand narrative system
-- Translate that into marketing + visual directions
-
----
-
-## Thinking Framework (MANDATORY)
-
-Always think in this order:
-1. Core Story (emotion + narrative)
-2. Brand Strategy (positioning + differentiation)
-3. Style (visual identity)
-4. Moodboard (reference direction)
-5. Execution Ideas (content + ads)
-
----
-
-## Rules
-
-- Do NOT repeat inputs
-- Do NOT output generic marketing lines
-- Make it feel premium, intentional, and specific
-- Every section must connect to the same story
-- Use retrieved insights as inspiration, not copy
-
----
-
-## Moodboard & Visual Match Rules (CRITICAL)
-
-- search_queries MUST be extremely specific to the brand DNA — derive the mood words from what THIS
-  brand/product/audience actually is, not from a default aesthetic. E.g. Urban/Gritty/Rave/Disruptive ->
-  "dirty", "raw", "grainy", "high-flash", "motion-blur"; but a soft/organic skincare brand -> "sun-warmed",
-  "airy", "linen", "diffused light"; a playful kids' brand -> "bright", "pastel", "soft-focus", "candid".
-  Do not default to dark/moody/gritty language when the brand doesn't call for it.
-- Always include the product type in search queries (e.g. "baggy hoodie streetwear", "serum bottle macro")
-
----
-
-## Output Format (STRICT JSON)
-
-{
-  "visible": [
-    {
-      "type": "chat_text",
-      "ai": "Full narrative story (emotional, cinematic, brand-defining)"
-    },
-    {
-      "type": "chat_text",
-      "info": {
-        "branding_strategy": {
-          "positioning": "",
-          "core_emotion": "",
-          "target_perception": "",
-          "unique_angle": ""
-        },
-        "style": {
-          "aesthetic": "",
-          "lighting": "",
-          "color_palette": [],
-          "composition": ""
-        },
-        "moodboard": {
-          "keywords": [],
-          "search_queries": [],
-          "notes": ""
-        },
-        "execution_blueprint": {
-          "photoshoots": [],
-          "instagram_posts": [],
-          "videos": [],
-          "ads": []
-        }
-      }
-    }
-  ],
-  "hidden": {
-    "style_tags": [],
-    "narrative_tokens": []
-  }
-}
-
----
-
-## Tone
-- Cinematic
-- Sharp
-- Strategic
-- No fluff
-
-## Example Thinking
-
-Bad:  "A premium skincare brand with luxury feel"
-Good: "A ritual of slowing down — where skincare becomes a moment of quiet control in a chaotic world"
-
----
-
-${questionnaireRule}
-
-Return ONLY the JSON above. No markdown. No preamble. No extra keys.
-`.trim();
+  return STORYTELLER_SKILL.body
+    .replace("{{briefRule}}", briefRule)
+    .replace("{{questionnaireRule}}", questionnaireRule);
 }
 
 export class StorytellerTool implements Tool {
   name = "storyteller";
   description =
-    "Establishes the brand's core narrative — emotional hook, positioning, and product essence — that every other creative tool builds on. Run this first for any new brand/campaign direction; skip it if a story already exists in memory unless the user explicitly wants to change direction.";
+    "Establishes the brand's core narrative — emotional hook, positioning, and product essence — that every other creative tool builds on.";
+  whenToUse = STORYTELLER_SKILL.whenToUse;
+  routingNotes = STORYTELLER_SKILL.routingNotes;
   private textService: TextService;
   private storytellingEngine: StorytellingEngineService;
   private assetSearchService: AssetSearchService;
@@ -207,6 +108,51 @@ export class StorytellerTool implements Tool {
       };
     }
 
+    // ── Gate: creative brief — ask once before inventing the narrative ──────
+    // Without this, the LLM improvises the whole direction from brand context
+    // alone every time, which converges on the same default aesthetic regardless
+    // of what the user actually wants. "ai_decide" skips straight to generation;
+    // "custom" collects a brief that gets woven into the prompt as the primary
+    // direction instead of the model's own guess.
+    const userBriefChoice = ctx.memory?.creative?.userBriefChoice;
+    const answeredBriefChoice = ctx.memory?.conversation?.answeredQuestions?.includes("story_brief_choice");
+
+    if (!userBriefChoice && !answeredBriefChoice) {
+      return {
+        pauseForUserInput: true,
+        visible: [{
+          type: "choice_questionnaire",
+          questionId: "story_brief_choice",
+          content: {
+            title: "Creative direction",
+            question: "Do you have a tone, vibe, or story direction in mind for this, or want me to propose one?",
+            options: [
+              { id: "custom", label: "I have a direction", description: "Tell me the tone, vibe, or references you want." },
+              { id: "ai_decide", label: "Suggest one for me", description: "Build the narrative from the brand and product alone." },
+            ]
+          }
+        }]
+      };
+    }
+
+    const answeredBriefCustom = ctx.memory?.conversation?.answeredQuestions?.includes("story_brief_custom");
+    if (userBriefChoice === "custom" && !ctx.memory?.creative?.userBrief && !answeredBriefCustom) {
+      return {
+        pauseForUserInput: true,
+        visible: [{
+          type: "choice_questionnaire",
+          questionId: "story_brief_custom",
+          content: {
+            title: "Tell me the direction",
+            question: "What tone, vibe, or references do you want this to lean into?",
+            options: []
+          }
+        }]
+      };
+    }
+
+    const userBrief = ctx.memory?.creative?.userBrief;
+
     // ── Qdrant search — use brand DNA, not raw message ────────────────────
     // Raw message ("yes go ahead", "make it urban") produces useless vector hits.
     // Build a semantic query from what we actually know about the brand.
@@ -216,6 +162,7 @@ export class StorytellerTool implements Tool {
       ctx.brandContext?.industry,
       ctx.memory?.creative?.style?.vibe,
       ctx.brandContext?.targetAudience,
+      userBrief,
     ].filter(Boolean).join(' ') || input.message || "fashion brand narrative";
 
     let retrievedInsights: string[] = [];
@@ -228,10 +175,11 @@ export class StorytellerTool implements Tool {
     }
 
     // ── Build prompt — with hard prohibition since product is locked ───────
-    const systemInstruction = buildSystemPrompt(productLocked);
+    const systemInstruction = buildSystemPrompt(productLocked, !!userBrief);
 
     const promptPayload = {
       userQuery: input.message || "Generate a creative narrative",
+      userBrief: userBrief || undefined,
       brandProfile: ctx.brandContext || {},
       product: ctx.memory?.product || {},
       retrievedInsights,

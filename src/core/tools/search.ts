@@ -1,6 +1,11 @@
 import { Tool, ToolContext } from "../../services/chat/tools/Tool";
 import { ToolResponse } from "../../types/chat";
 import { AssetSearchService } from "../../services/assetSearch.service";
+// @ts-ignore — text module via wrangler rules
+import searchSkillRaw from "../skills/search.md";
+import { parseSkill } from "../skills/loadSkill";
+
+const SEARCH_SKILL = parseSkill(searchSkillRaw);
 
 export interface SearchInput {
   query: string;
@@ -26,7 +31,8 @@ export interface SearchEnv {
 export class SearchTool implements Tool {
   name = "search";
   description =
-    "Semantic search over the user's uploaded assets and prior creative work. Use to find relevant reference images, past products, or moodboard items by description.";
+    "Semantic search over the user's uploaded assets and prior creative work. Finds relevant reference images, past products, or moodboard items by description.";
+  whenToUse = SEARCH_SKILL.whenToUse;
 
   private searchService: AssetSearchService;
 

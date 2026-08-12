@@ -5,31 +5,12 @@ import { getDb } from "../../../db";
 import { privateAssets } from "../../../db/schema";
 import { inArray, eq, and } from "drizzle-orm";
 import { fetchR2AsBase64, getSignedR2Url, base64ToArrayBuffer } from "../../../lib/r2";
+// @ts-ignore — text module via wrangler rules
+import avatarGeneratorSkillRaw from "../../../core/skills/avatar-generator.md";
+import { parseSkill } from "../../../core/skills/loadSkill";
 
-const AVATAR_BLUEPRINT_PROMPT = `
-You are a casting director for a high-end AI fashion brand.
-Generate a detailed model persona blueprint based on the brand story and style.
-
-CRITICAL: if "userDescription" is present in the input, it is the user's own words describing exactly
-who they want — treat it as the source of truth and honor every detail in it literally (ethnicity, build,
-vibe, styling, age, etc.). Do NOT substitute, override, or "improve" on anything the user actually stated.
-Only invent/infer attributes the user description left unspecified, and when inferring, take the cue from
-brand story/style — never default to a specific ethnicity or look the user didn't ask for.
-
-Return STRICT JSON only:
-{
-  "models": [
-    {
-      "id": "model_1",
-      "name": "a single short first name for this model, fitting their vibe (e.g. 'Aria', 'Kai')",
-      "look": "hyper-detailed physical description — height, build, face structure, hair, skin tone",
-      "vibe": "one clear mood (e.g. confident authority, quiet luxury)",
-      "ethnicity": "specific ethnicity",
-      "gender": "male|female|other"
-    }
-  ]
-}
-`.trim();
+const AVATAR_GENERATOR_SKILL = parseSkill(avatarGeneratorSkillRaw);
+const AVATAR_BLUEPRINT_PROMPT = AVATAR_GENERATOR_SKILL.body;
 
 // Trimmed to 1 angle for now (was 5) — faster/cheaper while iterating on the chat flow.
 const ANGLES = [
@@ -47,7 +28,8 @@ const FALLBACK_NAMES = [
 export class AvatarGeneratorTool implements Tool {
   name = "avatar_generator";
   description =
-    "Casts and generates AI human model personas (multi-angle reference images) to wear/use products in shoots. Needs brand story/style in memory. Usually chained in automatically by shoot_engine_planner when the user wants models — call directly only when the user asks to create or preview avatars on their own, outside a shoot.";
+    "Casts and generates AI human model personas (multi-angle reference images) to wear/use products in shoots. Needs brand story/style in memory.";
+  whenToUse = AVATAR_GENERATOR_SKILL.whenToUse;
   private textService: TextService;
   private env: any;
 
@@ -223,7 +205,7 @@ Add a 4th option: { "id": "custom", "label": "I'll describe them", "description"
     console.log("[AvatarGenerator] Generating", ANGLES.length, "avatar angle(s) in parallel...");
 
     const avatarJobs = ANGLES.map(angle =>
-      this.generateAndStoreAvatarAngle({ model, angle, style: memory.creative?.style, garmentBytes, ctx, projectId })
+      this.generateAndStoreAvatarAngle({ model, angle, garmentBytes, ctx, projectId })
     );
 
     const results = await Promise.allSettled(avatarJobs);
@@ -330,17 +312,16 @@ Add a 4th option: { "id": "custom", "label": "I'll describe them", "description"
   }
 
   private async generateAndStoreAvatarAngle({
-    model, angle, style, garmentBytes, ctx, projectId
+    model, angle, garmentBytes, ctx, projectId
   }: {
     model: any;
     angle: { id: string; pose: string };
-    style: any;
     garmentBytes: { data: string; mimeType: string } | null;
     ctx: ToolContext;
     projectId: string;
   }): Promise<AvatarImage> {
 
-    const prompt = this.buildAvatarPrompt(model, angle, style, !!garmentBytes);
+    const prompt = this.buildAvatarPrompt(model, angle, !!garmentBytes);
 
     const parts: any[] = [{ text: prompt }];
     if (garmentBytes) {
@@ -403,22 +384,29 @@ Add a 4th option: { "id": "custom", "label": "I'll describe them", "description"
     return { angleId: angle.id, r2Key: key, signedUrl };
   }
 
+  // Deliberately NOT styled to the brand/shoot's lighting, aesthetic, or color
+  // palette — this is a neutral casting reference, not a scene photo. Baking the
+  // brand's mood into the avatar's own generation locked that model into one
+  // specific look forever (e.g. permanently lit like a Tokyo night shoot), even
+  // when reused for a completely different shoot later. The actual setting gets
+  // composited in at final shoot generation instead (shoot_engine_planner now
+  // resolves the vibe/setting BEFORE casting a model, precisely so this stays
+  // decoupled).
   private buildAvatarPrompt(
     model: any,
     angle: { id: string; pose: string },
-    style: any,
     hasGarment: boolean
   ): string {
     return [
-      `Professional fashion editorial photograph of ${model.look}.`,
+      `Professional studio casting reference photograph of ${model.look}.`,
       `Ethnicity: ${model.ethnicity}. Vibe: ${model.vibe}.`,
       `Pose: ${angle.pose}.`,
       hasGarment
         ? `Wearing the exact garment from the reference image — preserve color, cut, silhouette exactly.`
         : `Wearing stylish fashion-forward clothing matching the brand aesthetic.`,
-      `Lighting: ${style?.lighting || "soft natural directional light"}.`,
-      `Aesthetic: ${style?.aesthetic || "premium fashion editorial"}.`,
-      `Color palette: ${(style?.color_palette || []).join(", ") || "neutral tones"}.`,
+      `Setting: plain seamless white studio backdrop, no props, no environment, no scenery.`,
+      `Lighting: clean, even, soft studio lighting — no colored gels, no mood/atmospheric lighting.`,
+      `This is a neutral model reference, not a styled campaign shot.`,
       `Lens: ${["front", "side"].includes(angle.id) ? "85mm portrait" : "50mm"}.`,
       `Full body visible. Garment clearly shown. Ultra high quality, 2K resolution.`,
     ].filter(p => typeof p === "string").join(" ");
