@@ -20,8 +20,8 @@ node_modules/
 .env.production
 .dev.vars
 
-# wrangler config (contains local secrets)
-wrangler.jsonc
+# wrangler config — tracked so Cloudflare CI can build. Secrets are NOT here;
+# they're set as Worker secrets in the dashboard / via `wrangler secret put`.
 worker-configuration.d.ts
 
 # local scratch/utility scripts (may contain hardcoded secrets)
