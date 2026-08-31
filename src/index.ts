@@ -34,6 +34,7 @@ import { sessionMiddleware, type AuthVariables } from './middleware/auth'
 import { GlobalLimiter } from './durable-objects/GlobalLimiter'
 import { ChatSession } from './durable-objects/ChatSession'
 import { Responser } from './durable-objects/Responser'
+import { Orchestrator } from './core/orchestrator/Orchestrator'
 import { StorytellerTool } from './services/chat/tools/StorytellerTool'
 
 type Bindings = {
@@ -62,7 +63,13 @@ type Bindings = {
   IMAGE_QUEUE: Queue
   VIDEO_QUEUE: Queue
   OPENAI_API_KEY: string
+  OPENROUTER_API_KEY?: string
+  FAL_KEY?: string
   PREPROCESSOR_URL?: string
+  // Credit-saving switches — set to "false" to stop short of the actual image
+  // API call and stream the generated prompt(s) for review instead.
+  IMAGE_GEN_ENABLED?: string
+  PHOTOSHOOT_IMAGE_GEN_ENABLED?: string
 }
 
 const app = new Hono<{ Bindings: Bindings, Variables: AuthVariables }>()
@@ -84,9 +91,16 @@ app.use('*', async (c, next) => {
     allowedOrigins.push(c.env.FRONTEND_URL);
   }
 
+  // Next.js falls back to the next free port (3001, 3002, ...) whenever 3000 is
+  // already taken by something else on the machine — a hardcoded localhost:3000-only
+  // allowlist breaks CORS every time that happens. In dev, accept any localhost/
+  // 127.0.0.1 origin regardless of port instead of hardcoding a handful of them.
+  const isLocalDevOrigin = (o: string) =>
+    c.env.ENV === 'development' && /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(o);
+
   return cors({
     origin: (origin) => {
-      if (allowedOrigins.includes(origin) || !origin) {
+      if (!origin || allowedOrigins.includes(origin) || isLocalDevOrigin(origin)) {
         return origin;
       }
       return allowedOrigins[0]; // fallback
@@ -198,7 +212,7 @@ app.get('/users', sessionMiddleware, async (c) => {
   }
 })
 
-export { GlobalLimiter, ChatSession, Responser }
+export { GlobalLimiter, ChatSession, Responser, Orchestrator }
 
 // A simple in-memory rate limiter for external APIs
 const rateLimiter = new Map<string, number[]>();
@@ -215,9 +229,26 @@ async function rateLimit(key: string, limit: number, windowMs: number) {
   rateLimiter.set(key, filtered);
 }
 
+// Fields cleared on the campaign object when a shoot job finishes (success OR
+// failure). `shootEngineQueued`/`shootConfirmed` release the mutex + re-confirm
+// gates; the vibe/brief fields are PER-SHOOT and must reset too so the next
+// "make a shoot" re-runs SimpleShootPlannerTool's Gate 1/1a (vibe picker +
+// brief) instead of silently reusing the last shoot's pick. Without the vibe/
+// brief fields here, the picker only ever appears once per session — contrary
+// to the gate's own "reset to undefined whenever a shoot job completes" design.
+// Matches the field set in Orchestrator._resetShootState.
+const SHOOT_COMPLETION_RESET = {
+  shootEngineQueued: false,
+  shootConfirmed: false,
+  shootBriefChoice: undefined,
+  shootBrief: undefined,
+  vibeChoice: undefined,
+  vibeCandidates: undefined,
+} as const;
+
 export default {
   fetch: app.fetch,
-  
+
   async queue(batch: MessageBatch<any>, env: Bindings, ctx: ExecutionContext) {
     console.log(`[Queue] Processing batch of ${batch.messages.length} messages from ${batch.queue}`);
 
@@ -270,6 +301,11 @@ export default {
             // If the user clicked stop, appendJobEvents returns { cancelled: true }
             // and we throw to abort engine.run() immediately.
             const stub = getDoStub();
+            // Credit-saving switch: when off, ShootEngine still builds every prompt
+            // (asset refs, model refs, styling) but stops short of the OpenAI call —
+            // it streams a `prompt` event per shot instead. Explicit input.dryRun
+            // (e.g. the /shoots dev route) always wins over the env default.
+            const dryRun = input.dryRun ?? (env.PHOTOSHOOT_IMAGE_GEN_ENABLED === 'false');
             await engine.run(
               {
                 intent: input.intent,
@@ -277,6 +313,7 @@ export default {
                 projectId: resolvedProjectId,
                 userId: resolvedUserId,
                 modelR2Keys: resolvedModelR2Keys,
+                dryRun,
               },
               async (event: any) => {
                 if (event.type !== 'done' && jobId) {
@@ -285,7 +322,87 @@ export default {
                 }
               }
             );
-            // result.visible stays empty — events were already appended incrementally
+            // result.visible stays empty — events were already appended incrementally.
+            // Clear the double-queue guard + per-shoot vibe/brief now that this
+            // shoot actually finished — otherwise shoot_engine_planner refuses
+            // every subsequent shoot request (guard), and the vibe picker/brief
+            // never re-appears (stale vibeChoice) for the rest of the session.
+            result.memoryUpdate = { campaign: { ...SHOOT_COMPLETION_RESET } };
+            break;
+          }
+
+          case "simple_shoot_engine": {
+            const { SimpleShootEngine } = await import('./services/shoots/SimpleShootEngine');
+            const engine = new SimpleShootEngine({
+              OPENROUTER_API_KEY: env.OPENROUTER_API_KEY!,
+              FAL_KEY: env.FAL_KEY!,
+              GEMINI_API_KEY: env.GEMINI_API_KEY,
+              VERTEX_PROJECT_ID: env.VERTEX_PROJECT_ID,
+              VERTEX_LOCATION: env.VERTEX_LOCATION,
+              VERTEX_SERVICE_ACCOUNT_EMAIL: env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+              VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY,
+              QDRANT_URL: env.QDRANT_URL,
+              QDRANT_API_KEY: env.QDRANT_API_KEY,
+              DATABASE_URL: env.DATABASE_URL,
+              ASSETS_BUCKET: env.ASSETS_BUCKET,
+              API_URL: env.API_URL,
+            });
+
+            const resolvedAssetIds: string[] =
+              input.assetIds?.length
+                ? input.assetIds
+                : (memory?.product?.assetIds ?? (memory?.product?.primaryAssetId ? [memory.product.primaryAssetId] : []));
+            const resolvedProjectId: string = input.projectId || memory?.projectId || 'default';
+            const resolvedUserId: string    = input.userId || userId;
+            const resolvedModelR2Keys: string[] | undefined =
+              input.modelR2Keys?.length
+                ? input.modelR2Keys
+                : (memory?.campaign?.avatarImages?.length
+                    ? memory.campaign.avatarImages.map((a: any) => a.r2Key).filter(Boolean)
+                    : undefined);
+
+            const stub = getDoStub();
+            // Per-run id so the frontend can build stable, collision-free placeholder ids
+            // (shoot-{runId}-{shootIndex}) across multiple shoot runs in the same session.
+            const runId = crypto.randomUUID();
+            // Translate SimpleShootEngine's event vocabulary into ChatEvent-compatible
+            // shapes before forwarding — same appendJobEvents real-time streaming the
+            // full ShootEngine uses above, just a different source event shape.
+            await engine.run(
+              {
+                query: input.query,
+                assetIds: resolvedAssetIds,
+                projectId: resolvedProjectId,
+                userId: resolvedUserId,
+                count: input.count,
+                modelR2Keys: resolvedModelR2Keys,
+                vibeImageUrl: input.vibeImageUrl,
+              },
+              async (event: any) => {
+                if (!jobId) return;
+                let outEvent: any = null;
+                if (event.type === 'status') outEvent = { type: 'status', content: event.content };
+                else if (event.type === 'creative_direction') outEvent = { type: 'status', content: event.bigIdea };
+                else if (event.type === 'prompt') outEvent = { type: 'shoot_generating', shootIndex: event.shootIndex, runId };
+                else if (event.type === 'photoshoots') {
+                  outEvent = { ...event, items: (event.items ?? []).map((it: any) => ({ ...it, runId })) };
+                }
+                else if (event.type === 'error') outEvent = event;
+                // 'isolated' and 'done' intentionally not forwarded — no frontend
+                // surface for isolation previews yet, and 'done' is handled by the
+                // job-finalisation step below (handleToolResult), not per-engine-event.
+                if (!outEvent) return;
+
+                const { cancelled } = await stub.appendJobEvents(jobId, [outEvent]);
+                if (cancelled) throw new Error('Cancelled by user');
+              }
+            );
+            // result.visible stays empty — events were already appended incrementally.
+            // Clear the double-queue guard + per-shoot vibe/brief now that this
+            // shoot actually finished — otherwise shoot_engine_planner refuses
+            // every subsequent shoot request (guard), and the vibe picker/brief
+            // never re-appears (stale vibeChoice) for the rest of the session.
+            result.memoryUpdate = { campaign: { ...SHOOT_COMPLETION_RESET } };
             break;
           }
 
@@ -316,9 +433,17 @@ export default {
         // Always report the error back to the DO so the job is never stuck in "pending".
         if (sessionId && jobId) {
           try {
-            await getDoStub().handleToolResult(tool, {
+            const failureResult: any = {
               visible: [{ type: 'error', message: `Generation failed: ${err.message}` }]
-            }, jobId);
+            };
+            // A failed shoot must still release the double-queue guard + per-shoot
+            // vibe/brief — otherwise this session can never attempt another shoot
+            // (guard stranded) and the next attempt silently reuses the failed
+            // shoot's vibe/brief instead of re-asking.
+            if (tool === 'shoot_engine' || tool === 'simple_shoot_engine') {
+              failureResult.memoryUpdate = { campaign: { ...SHOOT_COMPLETION_RESET } };
+            }
+            await getDoStub().handleToolResult(tool, failureResult, jobId);
             msg.ack();
           } catch {
             msg.retry({ delaySeconds: 10 });

@@ -1,6 +1,7 @@
 import { Tool, ToolContext } from "./Tool";
 import { ToolResponse } from "../../../types/chat";
 import { TextService } from "../../gemini/TextService";
+import { ITextService } from "../ITextService";
 import { StorytellingEngineService } from "../../storytellingEngine.service";
 import { AssetSearchService } from "../../assetSearch.service";
 import { getDb } from "../../../db";
@@ -10,10 +11,10 @@ import { inArray } from "drizzle-orm";
 // ─── Prompt builder — conditional on whether product is already locked ────────
 function buildSystemPrompt(productLocked: boolean): string {
   const questionnaireRule = productLocked
-    ? `CRITICAL: Do NOT include a choice_questionnaire in your output under any circumstance.
+    ? `CRITICAL: Do NOT include a questionnaire in your output under any circumstance.
 The product and brand context are already confirmed. Your only job is the narrative.
 Do NOT ask questions. Do NOT request more information.`
-    : `ONLY include a choice_questionnaire if product information is genuinely missing from the payload.
+    : `ONLY include a questionnaire if product information is genuinely missing from the payload.
 If product data is present, do not ask for it again.
 The questionnaire MUST follow the exact structure in the output format.`;
 
@@ -33,11 +34,25 @@ You are given:
 1. Brand context (tone, audience, positioning)
 2. Product information
 3. Retrieved storytelling patterns (from vector database)
+4. userBrief — the user's OWN stated direction for this story, when they gave one
+5. userContext — free-text notes the user gave when they otherwise delegated the
+   story to you: target audience, campaign goal, mood/tone words, and/or anything
+   they explicitly want included or avoided. May be absent (they skipped it).
 
 Your job is to:
 - Synthesize all inputs
 - Create ONE cohesive brand narrative system
 - Translate that into marketing + visual directions
+
+CRITICAL: if "userBrief" is present, it is the user's own words about the story/
+tone/angle they want — treat it as the source of truth and build the narrative
+around it. Do NOT override or "improve" on the direction they actually gave. Only
+when userBrief is absent should you develop the direction freely from the product/
+brand context alone.
+
+If "userContext" is present, it is real signal, not filler — ground audience framing,
+positioning, and any "must include/avoid" constraints in it explicitly. Never
+fabricate an audience/goal/mood if userContext or brandProfile already state one.
 
 ---
 
@@ -56,7 +71,7 @@ Always think in this order:
 
 - Do NOT repeat inputs
 - Do NOT output generic marketing lines
-- Make it feel premium, intentional, and specific
+- Make it feel intentional and specific to THIS brand — not "elevated" by default
 - Every section must connect to the same story
 - Use retrieved insights as inspiration, not copy
 
@@ -75,12 +90,12 @@ Always think in this order:
 {
   "visible": [
     {
-      "type": "canvas_story",
-      "content": "Full narrative story (emotional, cinematic, brand-defining)"
+      "type": "chat_text",
+      "ai": "Full narrative story (emotional, cinematic, brand-defining)"
     },
     {
-      "type": "canvas_info",
-      "data": {
+      "type": "chat_text",
+      "info": {
         "branding_strategy": {
           "positioning": "",
           "core_emotion": "",
@@ -116,15 +131,25 @@ Always think in this order:
 ---
 
 ## Tone
-- Cinematic
-- Sharp
-- Strategic
-- No fluff
+
+Match THIS brand — do not default to cinematic/intense/luxury language unless the
+brand actually is that. A playful, affordable, or everyday-essentials brand should
+read warm, direct, or fun instead. The constant across every brand is specificity
+and strategic clarity, not a particular register. Sharp and no-fluff always; moody
+and cinematic only when the brand calls for it.
 
 ## Example Thinking
 
-Bad:  "A premium skincare brand with luxury feel"
-Good: "A ritual of slowing down — where skincare becomes a moment of quiet control in a chaotic world"
+Bad (any brand): "A premium skincare brand with luxury feel" — generic, could
+describe anything.
+
+Good (an intense/premium brand): "A ritual of slowing down — where skincare
+becomes a moment of quiet control in a chaotic world."
+
+Good (a playful/affordable brand): "Skincare that doesn't take itself too
+seriously — glow without the ritual."
+
+The point in both is specificity to the actual brand, not intensity.
 
 ---
 
@@ -136,14 +161,19 @@ Return ONLY the JSON above. No markdown. No preamble. No extra keys.
 
 export class StorytellerTool implements Tool {
   name = "storyteller";
-  description = "Building the brand's narrative, emotional core, and product essence.";
-  private textService: TextService;
+  description =
+    "Establishes the brand's core narrative — emotional hook, positioning, and product essence — that every other creative tool builds on. Run this first for any new brand/campaign direction; skip it if a story already exists in memory unless the user explicitly wants to change direction.";
+  private textService: ITextService;
   private storytellingEngine: StorytellingEngineService;
   private assetSearchService: AssetSearchService;
   private env: any;
 
+  // Duck-type generateText rather than `instanceof TextService` so an injected
+  // non-Gemini engine (OpenRouter qwen, from the Orchestrator) is kept instead
+  // of being silently replaced by a Gemini fallback. Note: storytellingEngine
+  // below is Qdrant vector *search* only, not text generation.
   constructor(textServiceOrEnv: any, env?: any) {
-    if (textServiceOrEnv instanceof TextService) {
+    if (typeof textServiceOrEnv?.generateText === "function") {
       this.textService = textServiceOrEnv;
       this.env = env;
     } else {
@@ -178,26 +208,116 @@ export class StorytellerTool implements Tool {
 
   async run(input: any, ctx: ToolContext): Promise<ToolResponse> {
     const productLocked = ctx.memory?.product?.productLocked === true;
-    const alreadyAskedProduct = ctx.memory?.conversation?.answeredQuestions?.includes("product_source");
 
-    // ── Gate: if product not locked AND not already asked, ask once and stop ──
-    // Responser.resolveAttachments() is the single source of truth.
-    // By the time this runs, it has already checked: this turn's attachments
-    // → memory → DB. If productLocked is still false, nothing exists anywhere.
-    // Check answeredQuestions to prevent asking the same question repeatedly.
-    if (!productLocked && !alreadyAskedProduct) {
+    // ── Gate: never generate a narrative without a real, locked product ──────
+    // Responser.resolveAttachments() is the single source of truth for
+    // attachments — by the time this runs it has already checked: this turn's
+    // attachments → memory → DB. If productLocked is still false here, nothing
+    // exists anywhere yet, so we must not proceed no matter how many turns
+    // have passed — otherwise this ends up inventing a full brand narrative
+    // from an empty product object the moment the user merely picks "Upload
+    // an image" (intent, not the actual file) instead of waiting for it.
+    if (!productLocked) {
+      // They already answered "I'll describe it" — this message IS the
+      // description. Capture it and lock, rather than re-asking.
+      if (ctx.memory?.campaign?.awaitingProduct && input.message?.trim()) {
+        return {
+          visible: [{ type: "status", content: "Got it — using your description for the product." }],
+          memoryUpdate: {
+            product: { ...ctx.memory?.product, source: "describe", description: input.message.trim(), productLocked: true },
+            campaign: { ...ctx.memory?.campaign, awaitingProduct: false },
+          },
+        };
+      }
+
+      const alreadyAskedProduct = ctx.memory?.conversation?.answeredQuestions?.includes("product_source");
+      if (!alreadyAskedProduct) {
+        return {
+          pauseForUserInput: true,
+          visible: [{
+            type: "choice_questionnaire",
+            questionId: "product_source",
+            content: {
+              title: "Let's get your product",
+              question: "I couldn't find a product in your project. How would you like to add it?",
+              options: [
+                { id: "upload", label: "Upload an image", description: "Share a photo of your product." },
+                { id: "describe", label: "I'll describe it", description: "Tell me what it looks like." },
+              ]
+            }
+          }]
+        };
+      }
+
+      // Already asked, still no real product — they picked "upload" but
+      // haven't attached anything yet (or "describe" but this message was
+      // empty/attachment-only). Wait instead of generating from nothing.
+      return {
+        visible: [{ type: "chat_text", ai: "Still waiting on that product — go ahead and upload the image, or tell me what it looks like." }],
+      };
+    }
+
+    // ── Gate: ask for creative direction before inventing one ────────────────
+    // Product being locked is not the same as knowing what story to tell.
+    // Without this, the tool jumped straight from "product exists" to a full
+    // invented narrative (specific mood, setting, tagline language) with zero
+    // input from the user on tone/angle — exactly the "didn't even ask first"
+    // complaint. Orchestrator.extractAnswer already had working extractors
+    // for story_brief_choice/story_brief_custom (creative.userBriefChoice/
+    // userBrief) — nothing ever actually asked the question until now.
+    const briefChoice = ctx.memory?.creative?.userBriefChoice;
+    const answeredBriefChoice = ctx.memory?.conversation?.answeredQuestions?.includes("story_brief_choice");
+
+    if (!briefChoice && !answeredBriefChoice) {
       return {
         pauseForUserInput: true,
         visible: [{
           type: "choice_questionnaire",
-          questionId: "product_source",
+          questionId: "story_brief_choice",
           content: {
-            title: "Let's get your product",
-            question: "I couldn't find a product in your project. How would you like to add it?",
+            title: "Brand direction",
+            question: "Any specific story, tone, or angle you want for this brand — or should I develop one from the product/brand info?",
             options: [
-              { id: "upload", label: "Upload an image", description: "Share a photo of your product." },
-              { id: "describe", label: "I'll describe it", description: "Tell me what it looks like." },
+              { id: "ai_decide", label: "Develop it for me", description: "Craft a narrative from the product and brand context." },
+              { id: "custom", label: "I'll describe it", description: "Tell me the story, tone, or angle you want." },
             ]
+          }
+        }]
+      };
+    }
+
+    const answeredBriefCustom = ctx.memory?.conversation?.answeredQuestions?.includes("story_brief_custom");
+    if (briefChoice === "custom" && !ctx.memory?.creative?.userBrief && !answeredBriefCustom) {
+      return {
+        pauseForUserInput: true,
+        visible: [{
+          type: "choice_questionnaire",
+          questionId: "story_brief_custom",
+          content: {
+            title: "Describe the direction",
+            question: "What story, tone, or angle do you want for this brand?",
+            options: []
+          }
+        }]
+      };
+    }
+
+    // ── Gate: even when delegated ("Develop it for me"), still gather the few
+    // things that actually change the narrative before inventing one from
+    // nothing but the product/brand payload. Free-text (options: []) so one
+    // reply can cover all of it — "skip" is a legitimate answer, not a retry
+    // loop, so this only ever gates on answeredQuestions, never on the value.
+    const answeredContextGate = ctx.memory?.conversation?.answeredQuestions?.includes("story_context_gate");
+    if (briefChoice === "ai_decide" && !answeredContextGate) {
+      return {
+        pauseForUserInput: true,
+        visible: [{
+          type: "choice_questionnaire",
+          questionId: "story_context_gate",
+          content: {
+            title: "A few quick things",
+            question: "Before I write this — who's it for (audience), what's the goal (launch, awareness, a sale, evergreen content), a couple of mood/tone words, and anything you definitely want included or avoided? Answer what you know, or just say \"skip\".",
+            options: []
           }
         }]
       };
@@ -228,6 +348,12 @@ export class StorytellerTool implements Tool {
 
     const promptPayload = {
       userQuery: input.message || "Generate a creative narrative",
+      // The user's own stated direction, if they gave one via the brief gate
+      // above — ground the narrative in this rather than inventing freely.
+      userBrief: ctx.memory?.creative?.userBrief,
+      // Audience/goal/mood/must-include-or-avoid gathered via story_context_gate
+      // when the user delegated ("Develop it for me") — empty string if skipped.
+      userContext: ctx.memory?.creative?.userContext || undefined,
       brandProfile: ctx.brandContext || {},
       product: ctx.memory?.product || {},
       retrievedInsights,
@@ -259,12 +385,12 @@ export class StorytellerTool implements Tool {
     // This is the safety net — never let a hallucinated question reach the client.
     const visible = (parsed.visible || []).filter((v: any) =>
       productLocked
-        ? v.type !== 'choice_questionnaire' && v.type !== 'questionnaire'
+        ? !(v.type === 'chat_text' && v.questionnaire)
         : true  // not locked — allow questionnaires through (but gate above returns early anyway)
     );
 
     // ── Moodboard image fetch ─────────────────────────────────────────────
-    const searchQueries: string[] = parsed.visible?.[1]?.data?.moodboard?.search_queries || [];
+    const searchQueries: string[] = parsed.visible?.[1]?.info?.moodboard?.search_queries || [];
     let moodboardImages: string[] = [];
 
     if (searchQueries.length > 0) {
@@ -288,11 +414,13 @@ export class StorytellerTool implements Tool {
 
           if (moodboardImages.length > 0) {
             visible.push({
-              type: "canvas_moodboard",
-              data: {
-                images: moodboardImages,
-                notes: parsed.visible?.[1]?.data?.moodboard?.notes
-                  || "Visual references pulled from the brand database."
+              type: "chat_text",
+              info: {
+                moodboard: {
+                  images: moodboardImages,
+                  notes: parsed.visible?.[1]?.info?.moodboard?.notes
+                    || "Visual references pulled from the brand database."
+                }
               }
             });
           }
@@ -309,9 +437,9 @@ export class StorytellerTool implements Tool {
       // Single source of truth for memory updates — Responser.handleToolResult merges this
       memoryUpdate: {
         creative: {
-          story: parsed.visible?.[0]?.content || "",
-          style: parsed.visible?.[1]?.data?.style || {},
-          canvasInfo: parsed.visible?.[1]?.data || {},
+          story: parsed.visible?.[0]?.ai || "",
+          style: parsed.visible?.[1]?.info?.style || {},
+          canvasInfo: parsed.visible?.[1]?.info || {},
           moodboardImages,
         }
       },
@@ -321,9 +449,9 @@ export class StorytellerTool implements Tool {
       // nextInput feeds into PhotoshootPlanner and downstream tools
       nextInput: {
         ...input,
-        story: parsed.visible?.[0]?.content || "",
-        style: parsed.visible?.[1]?.data?.style || {},
-        executionBlueprint: parsed.visible?.[1]?.data?.execution_blueprint || {},
+        story: parsed.visible?.[0]?.ai || "",
+        style: parsed.visible?.[1]?.info?.style || {},
+        executionBlueprint: parsed.visible?.[1]?.info?.execution_blueprint || {},
         moodboardImages,
       }
     };

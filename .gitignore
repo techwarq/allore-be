@@ -42,3 +42,13 @@ lerna-debug.log*
 
 # Debug run logs
 debug-runs/
+
+# pipeline (Python video pipeline)
+pipeline/venv/
+pipeline/cache/
+pipeline/output/
+pipeline/__pycache__/
+pipeline/**/__pycache__/
+pipeline/beats.json
+pipeline/selection_log.json
+pipeline/assets/*_prepped.jpg

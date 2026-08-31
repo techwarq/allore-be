@@ -35,7 +35,7 @@ const chat = new Hono<{
 chat.post('/', sessionMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json()
-  const { message, projectId, sessionId, attachments, model: requestedModel } = body
+  const { message, projectId, attachments, model: requestedModel } = body
 
   if (!message || !projectId) {
     return c.json({ error: 'Missing message or projectId.' }, 400)
@@ -72,7 +72,17 @@ chat.post('/', sessionMiddleware, async (c) => {
     }
 
     // 3. Connect to Responser DO
-    const sid = sessionId || `${projectId}-${user.id}`
+    // Deterministic per project+user — deliberately ignores any client-supplied
+    // `sessionId` here. Session state (avatar choice, shoot brief, vibe pick,
+    // answered gates) lives ONLY in this DO's storage, not the DB. If the
+    // client ever sent an inconsistent or freshly-generated id across "chats"
+    // for the same project, this would silently spin up a brand-new DO with
+    // empty campaign state on every reconnect — the product itself would still
+    // get re-detected via loadProjectHistory's DB fallback, but everything
+    // else would look "forgotten" and re-ask questions already answered.
+    // Pinning this to project+user guarantees the same DO every time,
+    // regardless of what the client does or doesn't track client-side.
+    const sid = `${projectId}-${user.id}`
     const responserId = c.env.RESPONSER.idFromName(sid)
     const responser = c.env.RESPONSER.get(responserId)
     

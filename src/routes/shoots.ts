@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { ShootEngine } from '../services/shoots/ShootEngine'
+import { SimpleShootEngine } from '../services/shoots/SimpleShootEngine'
 import { getDb } from '../db'
 import { users, projects } from '../db/schema'
 import { eq } from 'drizzle-orm'
@@ -13,7 +14,12 @@ type ShootsBindings = {
   VERTEX_SERVICE_ACCOUNT_EMAIL: string
   VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: string
   OPENAI_API_KEY: string
+  OPENROUTER_API_KEY: string
+  FAL_KEY: string
+  QDRANT_URL: string
+  QDRANT_API_KEY: string
   ASSETS_BUCKET: R2Bucket
+  API_URL?: string
   PREPROCESSOR_URL?: string
 }
 
@@ -122,6 +128,61 @@ shoots.post('/plan', async (c) => {
       )
     } catch (err: any) {
       await send({ type: 'error', message: err.message || 'Shoot engine failed' })
+    } finally {
+      await stream.close()
+    }
+  })
+})
+
+/**
+ * POST /shoots/simple
+ * Streams the lightweight pipeline: user query + reference images straight to shots —
+ * no forensics/routing/multi-stage analysis. Qwen 3.7 Flash (OpenRouter) writes the
+ * generation prompt, Seedream v5 (Fal) generates/edits the shots.
+ * Body: { query: string, assetIds: string[], projectId?: string, userId?: string, count?: number }
+ */
+shoots.post('/simple', async (c) => {
+  const body = await c.req.json()
+  const { query, assetIds, projectId, userId, count } = body
+
+  if (!query || !Array.isArray(assetIds)) {
+    return c.json({ error: 'Missing required fields: query, assetIds' }, 400)
+  }
+
+  const engine = new SimpleShootEngine({
+    OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY,
+    FAL_KEY: c.env.FAL_KEY,
+    GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+    VERTEX_PROJECT_ID: c.env.VERTEX_PROJECT_ID,
+    VERTEX_LOCATION: c.env.VERTEX_LOCATION,
+    VERTEX_SERVICE_ACCOUNT_EMAIL: c.env.VERTEX_SERVICE_ACCOUNT_EMAIL,
+    VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY: c.env.VERTEX_SERVICE_ACCOUNT_PRIVATE_KEY,
+    QDRANT_URL: c.env.QDRANT_URL,
+    QDRANT_API_KEY: c.env.QDRANT_API_KEY,
+    DATABASE_URL: c.env.DATABASE_URL,
+    ASSETS_BUCKET: c.env.ASSETS_BUCKET,
+    API_URL: c.env.API_URL,
+  })
+
+  return streamSSE(c, async (stream) => {
+    const send = async (event: object) => {
+      await stream.write(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`))
+    }
+
+    try {
+      let resolvedUserId = userId
+      let resolvedProjectId = projectId
+      if (!resolvedUserId || resolvedUserId === 'dev') {
+        const ctx = await resolveDevContext(c.env.DATABASE_URL)
+        resolvedUserId = ctx.userId
+        resolvedProjectId = resolvedProjectId || ctx.projectId
+      }
+      await engine.run(
+        { query, assetIds, projectId: resolvedProjectId || 'default', userId: resolvedUserId, count },
+        send,
+      )
+    } catch (err: any) {
+      await send({ type: 'error', message: err.message || 'Simple shoot engine failed' })
     } finally {
       await stream.close()
     }

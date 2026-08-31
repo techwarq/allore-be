@@ -170,6 +170,9 @@ export const privateAssets = pgTable('private_assets', {
   projectId: uuid('project_id').references(() => projects.id),
   r2Key: text('r2_key').notNull(),
   type: text('type'),
+  // User-facing name — used for approved+saved avatars (e.g. "Aria") so they're
+  // reusable/@-callable across sessions; null for ordinary (unlabeled) assets.
+  label: text('label'),
   tags: jsonb('tags').default([]).notNull(),
   colors: jsonb('colors').default([]).notNull(),
   angle: text('angle'),

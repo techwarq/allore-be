@@ -1,5 +1,5 @@
 import { ToolResponse } from "../../../types/chat";
-import { TextService } from "../../gemini/TextService";
+import { ITextService } from "../ITextService";
 
 export interface ToolContext {
   memory: any;
@@ -8,7 +8,10 @@ export interface ToolContext {
   attachments?: any[];
   userId?: string;
   sessionId?: string;
-  textService: TextService;
+  // Provider-agnostic text engine (currently OpenRouter qwen, injected by the
+  // Orchestrator). Only generateText() is guaranteed — image generation is not
+  // available here.
+  textService: ITextService;
 }
 
 export interface Tool {

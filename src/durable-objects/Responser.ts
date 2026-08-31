@@ -188,7 +188,7 @@ export class Responser extends DurableObject<ResponserEnv> {
 
     // Heartbeat — keeps SSE alive through Cloudflare's idle timeout
     this.heartbeatInterval = setInterval(() => {
-      this.sendEvent({ type: "status", content: " " }).catch(() => {
+      this.sendEvent({ type: "chat_text", status: " " }).catch(() => {
         clearInterval(this.heartbeatInterval);
         this.heartbeatInterval = null;
         // Client disconnected — release the lock so the next request isn't blocked
@@ -252,8 +252,8 @@ export class Responser extends DurableObject<ResponserEnv> {
     }
 
     for (const event of result.visible ?? []) {
-      if (event.type === "text") {
-        this.history.push({ role: "assistant", content: (event as any).content });
+      if (event.type === "chat_text" && event.ai) {
+        this.history.push({ role: "assistant", content: event.ai });
       }
       await this.sendEvent(event);
     }
@@ -266,11 +266,11 @@ export class Responser extends DurableObject<ResponserEnv> {
 
     if (result.pauseForUserInput) {
       const q = result.visible?.find(
-        (e: any) => e.type === "choice_questionnaire" || e.type === "questionnaire"
+        (e: any) => e.type === "chat_text" && e.questionnaire
       ) as any;
 
-      if (q?.questionId) {
-        this.memory.flowControl.pendingQuestion = { id: q.questionId };
+      if (q?.questionnaire?.questionId) {
+        this.memory.flowControl.pendingQuestion = { id: q.questionnaire.questionId };
         await this.persist();
       }
 
@@ -371,7 +371,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       }
 
       // Phase 2: Analyze intent
-      await this.sendEvent({ type: "status", content: "Analyzing your request..." });
+      await this.sendEvent({ type: "chat_text", status: "Analyzing your request..." });
 
       const catalog = getStandardToolCatalog(this.env as any, this.textService);
       const intentEngine = new IntentEngine(this.textService, catalog);
@@ -392,7 +392,7 @@ export class Responser extends DurableObject<ResponserEnv> {
       // Stream intent response to user
       if (plan.user_visible_response) {
         this.history.push({ role: "assistant", content: plan.user_visible_response });
-        await this.sendEvent({ type: "text", content: plan.user_visible_response });
+        await this.sendEvent({ type: "chat_text", ai: plan.user_visible_response });
       }
 
       this.currentInput = { message };
@@ -441,22 +441,22 @@ export class Responser extends DurableObject<ResponserEnv> {
           .run({ query: task.input?.query ?? this.currentInput?.message ?? "" }, ctx);
       },
       creative_studio: async () => {
-        await this.sendEvent({ type: "status", content: "Planning creative direction..." });
+        await this.sendEvent({ type: "chat_text", status: "Planning creative direction..." });
         return new CreativeStudioTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
       },
       storyteller: async () => {
-        await this.sendEvent({ type: "status", content: "Building brand narrative..." });
+        await this.sendEvent({ type: "chat_text", status: "Building brand narrative..." });
         return new StorytellerTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
       },
       avatar_generator: async () => {
-        await this.sendEvent({ type: "status", content: "Designing model personas..." });
+        await this.sendEvent({ type: "chat_text", status: "Designing model personas..." });
         return new AvatarGeneratorTool(this.textService, this.env as any)
           .run(this.currentInput, ctx);
       },
       shoot_engine_planner: async () => {
-        await this.sendEvent({ type: "status", content: "Preparing campaign shoot plan..." });
+        await this.sendEvent({ type: "chat_text", status: "Preparing campaign shoot plan..." });
         const { ShootEngineTool } = await import("../services/chat/tools/ShootEngineTool");
         return new ShootEngineTool().run(this.currentInput, ctx);
       },

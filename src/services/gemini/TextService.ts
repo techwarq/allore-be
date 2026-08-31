@@ -14,6 +14,32 @@ export class TextService extends BaseGeminiService implements ITextService {
   }
 
   /**
+   * Retries transient failures (timeouts, 429/503 "high demand") so a single
+   * slow/overloaded Gemini response doesn't hard-fail a whole tool step —
+   * every caller (storyteller, creative studio, avatar casting, etc.) gets
+   * this for free instead of each needing its own retry loop.
+   */
+  private async fetchWithRetry(url: string, init: RequestInit, timeoutMs: number, maxAttempts = 3): Promise<Response> {
+    let lastErr: any;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        if (response.ok || (response.status !== 429 && response.status !== 503)) return response;
+        lastErr = new Error(`Gemini HTTP ${response.status}`);
+      } catch (err) {
+        // AbortSignal.timeout throws a DOMException ("TimeoutError") — retryable,
+        // same as a network blip.
+        lastErr = err;
+      }
+      if (attempt < maxAttempts) {
+        console.warn(`[TextService] Attempt ${attempt} failed (${lastErr?.message || lastErr}), retrying...`);
+        await new Promise((r) => setTimeout(r, attempt * 1500));
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
    * Generates a single text response (non-streaming).
    */
   async generateText(payload: GenerateTextOpts): Promise<string> {
@@ -40,12 +66,12 @@ export class TextService extends BaseGeminiService implements ITextService {
       body.systemInstruction = this.normalizeSystemInstruction(payload.systemInstruction);
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(body) }, 30_000);
+    } catch (err: any) {
+      throw new Error(`Gemini Text Error (${url}): ${err?.message || err}`);
+    }
 
     if (!response.ok) {
       const error = await response.text();
@@ -81,12 +107,12 @@ export class TextService extends BaseGeminiService implements ITextService {
       body.systemInstruction = this.normalizeSystemInstruction(payload.systemInstruction);
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60_000),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(body) }, 60_000);
+    } catch (err: any) {
+      throw new Error(`Gemini Error (${url}): ${err?.message || err}`);
+    }
 
     if (!response.ok) {
       const error = await response.text();

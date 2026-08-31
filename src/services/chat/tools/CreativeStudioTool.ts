@@ -1,15 +1,22 @@
 import { Tool, ToolContext } from "./Tool";
 import { ToolResponse, ChatEvent } from "../../../types/chat";
 import { TextService } from "../../gemini/TextService";
+import { ITextService } from "../ITextService";
 
 export class CreativeStudioTool implements Tool {
   name = "creative_studio";
-  description = "Shaping brand direction, campaign thinking, and high-level creative planning.";
-  private textService: TextService;
+  description =
+    "Turns an existing brand story into concrete campaign/marketing direction and strategic recommendations. Requires a locked product (asks for one if missing). Use for 'what should we do' strategy questions, not for inventing the story itself (that's storyteller) or for generating the actual assets.";
+  private textService: ITextService;
   private env: any;
 
+  // First arg is either an injected text engine (anything implementing
+  // ITextService — currently OpenRouter qwen from the Orchestrator) or, in
+  // legacy call sites, the env from which a Gemini fallback is built. Detect by
+  // duck-typing generateText rather than `instanceof TextService`, so an
+  // injected non-Gemini engine isn't silently discarded and replaced with Gemini.
   constructor(textServiceOrEnv: any, env?: any) {
-    if (textServiceOrEnv instanceof TextService) {
+    if (typeof textServiceOrEnv?.generateText === "function") {
       this.textService = textServiceOrEnv;
       this.env = env;
     } else {
@@ -28,24 +35,43 @@ export class CreativeStudioTool implements Tool {
     // Product is guaranteed to be in memory if it exists anywhere
     // Responser.resolveAttachments() already checked attachments → memory → DB
     const productLocked = ctx.memory?.product?.productLocked === true;
-    const alreadyAskedProduct = ctx.memory?.conversation?.answeredQuestions?.includes("product_source");
 
-    if (!productLocked && !alreadyAskedProduct) {
-      // Only ask if Responser genuinely found nothing anywhere AND we haven't asked before
+    // Never proceed without a real, locked product — see StorytellerTool's gate
+    // for why (answering "upload" is intent, not the product itself; force-
+    // locking on that answer used to let this generate a plan from nothing).
+    if (!productLocked) {
+      if (ctx.memory?.campaign?.awaitingProduct && input.message?.trim()) {
+        return {
+          visible: [{ type: "chat_text", ai: "Got it — using your description for the product." }],
+          memoryUpdate: {
+            product: { ...ctx.memory?.product, source: "describe", description: input.message.trim(), productLocked: true },
+            campaign: { ...ctx.memory?.campaign, awaitingProduct: false },
+          },
+        };
+      }
+
+      const alreadyAskedProduct = ctx.memory?.conversation?.answeredQuestions?.includes("product_source");
+      if (!alreadyAskedProduct) {
+        // Only ask if Responser genuinely found nothing anywhere AND we haven't asked before
+        return {
+          pauseForUserInput: true,
+          visible: [{
+            type: "chat_text",
+            questionnaire: {
+              questionId: "product_source",
+              title: "Let's get your product",
+              question: "I couldn't find a product in your project. How would you like to add it?",
+              options: [
+                { id: "upload", label: "Upload an image", description: "Share a photo of your product." },
+                { id: "describe", label: "I'll describe it", description: "Tell me what it looks like." },
+              ]
+            }
+          }]
+        };
+      }
+
       return {
-        pauseForUserInput: true,
-        visible: [{
-          type: "choice_questionnaire",
-          questionId: "product_source",
-          content: {
-            title: "Let's get your product",
-            question: "I couldn't find a product in your project. How would you like to add it?",
-            options: [
-              { id: "uploaded", label: "Upload an image", description: "Share a photo of your product." },
-              { id: "describe", label: "I'll describe it", description: "Tell me what it looks like." },
-            ]
-          }
-        }]
+        visible: [{ type: "chat_text", ai: "Still waiting on that product — go ahead and upload the image, or tell me what it looks like." }],
       };
     }
 
@@ -74,15 +100,13 @@ You DO NOT generate final content. You ONLY:
 
 ## Question Strategy (STRICT SCHEMA)
 
-## Question Strategy (STRICT SCHEMA)
-
 - Ask only what is missing. Never ask more than 1–2 questions.
 - Use the RICH QUESTIONNAIRE format:
 {
   "visible": [
     {
-      "type": "choice_questionnaire",
-      "content": {
+      "type": "chat_text",
+      "questionnaire": {
         "title": "...", "question": "...",
         "options": [{ "id": "...", "label": "...", "description": "..." }]
       }
@@ -96,26 +120,34 @@ You DO NOT generate final content. You ONLY:
 
 If clarity is sufficient, return a 'plan':
 {
-  "visible": [{ "type": "plan", "summary": "...", "steps": ["..."], "needsApproval": true }],
+  "visible": [{ "type": "chat_text", "plan": { "summary": "...", "steps": ["..."] } }],
   "hidden": { "executionPlan": [{ "tool": "..." }] }
 }
 
 ---
 
 ## Tone
-Sharp, confident, creative. No fluff.
+Sharp, confident, no fluff — but match the brand's own register (playful brands
+get playful direction, not forced luxury framing).
 
 Return ONLY JSON.
     `.trim();
 
-    const contents = ctx.history.map(h => ({
-      role: (h.role === 'user' ? 'user' : 'model') as "user" | "model",
-      parts: [{ text: h.content }]
-    }));
+    // Only include history turns that actually carry text. A blank/undefined
+    // content (e.g. a persisted chat row with empty content, loaded by
+    // loadProjectHistory) would serialize to an empty `{}` part, which Gemini
+    // rejects with "contents[..].parts[0].data: required oneof field 'data'
+    // must have one initialized field" — and is just noise for any provider.
+    const contents = ctx.history
+      .filter(h => typeof h.content === 'string' && h.content.trim().length > 0)
+      .map(h => ({
+        role: (h.role === 'user' ? 'user' : 'model') as "user" | "model",
+        parts: [{ text: h.content }]
+      }));
     contents.push({ role: 'user' as const, parts: [{ text: input.message }] });
 
+    // No model pinned — uses the injected engine's default (OpenRouter qwen).
     const responseText = await this.textService.generateText({
-      model: "gemini-3-flash-preview",
       contents,
       systemInstruction: { parts: [{ text: systemInstruction }] }
     });
@@ -139,13 +171,13 @@ Return ONLY JSON.
         memoryUpdate,
         hidden: {
           projectId: (ctx as any).projectId || ctx.brandContext?.id || ctx.memory?.projectId,
-          activePlan: parsedResponse.visible?.find((v: any) => v.type === 'plan') || null
+          activePlan: parsedResponse.visible?.find((v: any) => v.type === 'chat_text' && v.plan)?.plan || null
         }
       };
     } catch (e) {
       console.error("[CreativeStudioTool] Failed to parse JSON:", responseText, e);
       return {
-        visible: [{ type: "text", content: "I'm having trouble formulating a plan. Could you clarify your vision?" }]
+        visible: [{ type: "chat_text", ai: "I'm having trouble formulating a plan. Could you clarify your vision?" }]
       };
     }
   }
