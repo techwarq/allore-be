@@ -7,9 +7,9 @@
     "nodejs_compat"
   ],
   "vars": {
-    "ENV": "development",
+    "ENV": "production",
     "API_URL": "https://allore-be.sonalinayak0804.workers.dev",
-    "FRONTEND_URL": "http://localhost:3000",
+    "FRONTEND_URL": "https://www.alloreai.com",
     "QDRANT_URL": "https://090c9618-7e77-44f2-94d2-d8d994251c88.eu-central-1-0.aws.cloud.qdrant.io",
     "VERTEX_PROJECT_ID": "gg-guidebooks-ai",
     "VERTEX_LOCATION": "us-central1",
